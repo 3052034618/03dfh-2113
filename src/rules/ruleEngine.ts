@@ -1,5 +1,5 @@
-import { Player, Character, Rule, RuleConfig, PlayerScore } from '../types';
-import { parseRuleConfig } from '../models/ruleModel';
+import { Player, Character, Rule, RuleConfig, RuleScope, ScriptType, PlayerScore } from '../types';
+import { parseRuleConfig, parseRuleScope } from '../models/ruleModel';
 
 export interface RuleEvaluationResult {
   score: number;
@@ -8,22 +8,26 @@ export interface RuleEvaluationResult {
 
 export interface RuleEvaluator {
   evaluate(player: Player, character: Character, config: RuleConfig): RuleEvaluationResult;
+  defaultApplicableTypes: ScriptType[];
 }
 
 const ruleEvaluators: Record<string, RuleEvaluator> = {};
 
-function registerRule(code: string, evaluator: RuleEvaluator): void {
-  ruleEvaluators[code] = evaluator;
+function registerRule(code: string, defaultApplicableTypes: ScriptType[], evaluator: (player: Player, character: Character, config: RuleConfig) => RuleEvaluationResult): void {
+  ruleEvaluators[code] = {
+    evaluate: evaluator,
+    defaultApplicableTypes
+  };
 }
 
-registerRule('gender_match', {
-  evaluate(player: Player, character: Character): RuleEvaluationResult {
+registerRule('gender_match', ['emotional', 'horror', 'hardcore', '欢乐', '阵营', 'other'],
+  (player: Player, character: Character): RuleEvaluationResult => {
     const reasons: string[] = [];
     let score = 0;
 
     if (player.gender === character.gender) {
       score = 20;
-      reasons.push(`性别匹配（${player.gender === 'male' ? '男' : '女'}）`);
+      reasons.push(`性别匹配（${player.gender === 'male' ? '男' : player.gender === 'female' ? '女' : '其他'}）`);
     } else if (player.gender !== 'other' && character.gender !== 'other') {
       score = -15;
       reasons.push('需要反串');
@@ -33,10 +37,10 @@ registerRule('gender_match', {
 
     return { score, reasons };
   }
-});
+);
 
-registerRule('minor_no_emotional_cross', {
-  evaluate(player: Player, character: Character, config: RuleConfig): RuleEvaluationResult {
+registerRule('minor_no_emotional_cross', ['emotional', 'horror', 'hardcore', '欢乐', '阵营', 'other'],
+  (player: Player, character: Character, config: RuleConfig): RuleEvaluationResult => {
     const reasons: string[] = [];
     let score = 0;
     const ageThreshold = config.ageThreshold || 18;
@@ -53,10 +57,10 @@ registerRule('minor_no_emotional_cross', {
 
     return { score, reasons };
   }
-});
+);
 
-registerRule('horror_courage_match', {
-  evaluate(player: Player, character: Character, config: RuleConfig): RuleEvaluationResult {
+registerRule('horror_courage_match', ['horror'],
+  (player: Player, character: Character, config: RuleConfig): RuleEvaluationResult => {
     const reasons: string[] = [];
     let score = 0;
     const weight = config.weight || 1;
@@ -81,10 +85,10 @@ registerRule('horror_courage_match', {
 
     return { score, reasons };
   }
-});
+);
 
-registerRule('hardcore_reasoning_match', {
-  evaluate(player: Player, character: Character, config: RuleConfig): RuleEvaluationResult {
+registerRule('hardcore_reasoning_match', ['hardcore'],
+  (player: Player, character: Character, config: RuleConfig): RuleEvaluationResult => {
     const reasons: string[] = [];
     let score = 0;
     const weight = config.weight || 1;
@@ -106,10 +110,10 @@ registerRule('hardcore_reasoning_match', {
 
     return { score, reasons };
   }
-});
+);
 
-registerRule('emotional_depth_match', {
-  evaluate(player: Player, character: Character, config: RuleConfig): RuleEvaluationResult {
+registerRule('emotional_depth_match', ['emotional'],
+  (player: Player, character: Character, config: RuleConfig): RuleEvaluationResult => {
     const reasons: string[] = [];
     let score = 0;
     const weight = config.weight || 1;
@@ -128,10 +132,10 @@ registerRule('emotional_depth_match', {
 
     return { score, reasons };
   }
-});
+);
 
-registerRule('lead_character_priority', {
-  evaluate(player: Player, character: Character, config: RuleConfig): RuleEvaluationResult {
+registerRule('lead_character_priority', ['emotional', 'horror', 'hardcore', '欢乐', '阵营', 'other'],
+  (player: Player, character: Character, config: RuleConfig): RuleEvaluationResult => {
     const reasons: string[] = [];
     let score = 0;
     const minReasoning = config.minReasoning || 4;
@@ -155,10 +159,10 @@ registerRule('lead_character_priority', {
 
     return { score, reasons };
   }
-});
+);
 
-registerRule('regular_customer_care', {
-  evaluate(player: Player, character: Character, config: RuleConfig): RuleEvaluationResult {
+registerRule('regular_customer_care', ['emotional', 'horror', 'hardcore', '欢乐', '阵营', 'other'],
+  (player: Player, character: Character, config: RuleConfig): RuleEvaluationResult => {
     const reasons: string[] = [];
     let score = 0;
 
@@ -174,10 +178,10 @@ registerRule('regular_customer_care', {
 
     return { score, reasons };
   }
-});
+);
 
-registerRule('cross_gender_willingness', {
-  evaluate(player: Player, character: Character, config: RuleConfig): RuleEvaluationResult {
+registerRule('cross_gender_willingness', ['emotional', 'horror', 'hardcore', '欢乐', '阵营', 'other'],
+  (player: Player, character: Character, config: RuleConfig): RuleEvaluationResult => {
     const reasons: string[] = [];
     let score = 0;
 
@@ -195,10 +199,10 @@ registerRule('cross_gender_willingness', {
 
     return { score, reasons };
   }
-});
+);
 
-registerRule('age_appropriateness', {
-  evaluate(player: Player, character: Character, config: RuleConfig): RuleEvaluationResult {
+registerRule('age_appropriateness', ['emotional', 'horror', 'hardcore', '欢乐', '阵营', 'other'],
+  (player: Player, character: Character, config: RuleConfig): RuleEvaluationResult => {
     const reasons: string[] = [];
     let score = 0;
 
@@ -217,7 +221,35 @@ registerRule('age_appropriateness', {
 
     return { score, reasons };
   }
-});
+);
+
+export function isRuleApplicableToType(rule: Rule, scriptType: ScriptType): boolean {
+  const scope = parseRuleScope(rule);
+  const evaluator = ruleEvaluators[rule.code];
+  if (!evaluator) return true;
+
+  if (scope.scriptTypes && scope.scriptTypes.length > 0) {
+    return scope.scriptTypes.includes(scriptType);
+  }
+
+  return evaluator.defaultApplicableTypes.includes(scriptType);
+}
+
+export function isRuleApplicableToStore(rule: Rule, storeId: number): boolean {
+  const scope = parseRuleScope(rule);
+  if (scope.allStores) return true;
+  if (!scope.storeIds || scope.storeIds.length === 0) return true;
+  return scope.storeIds.includes(storeId);
+}
+
+export function filterApplicableRules(rules: Rule[], scriptType: ScriptType, storeId?: number): Rule[] {
+  return rules.filter(rule => {
+    if (!rule.enabled) return false;
+    if (!isRuleApplicableToType(rule, scriptType)) return false;
+    if (storeId !== undefined && !isRuleApplicableToStore(rule, storeId)) return false;
+    return true;
+  });
+}
 
 export function evaluatePlayerCharacterPair(
   player: Player,
@@ -259,4 +291,9 @@ export function evaluatePlayerCharacterPair(
 
 export function getAvailableRuleCodes(): string[] {
   return Object.keys(ruleEvaluators);
+}
+
+export function getDefaultApplicableTypes(code: string): ScriptType[] {
+  const evaluator = ruleEvaluators[code];
+  return evaluator ? evaluator.defaultApplicableTypes : [];
 }

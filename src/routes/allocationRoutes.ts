@@ -5,6 +5,7 @@ import { generateAllocationSuggestion, getTopCandidates } from '../services/allo
 import { getEnabledRules } from '../models/ruleModel';
 import { getScriptById, getCharactersByScriptId, getRelationshipsByScriptId } from '../models/scriptModel';
 import { getStoreById } from '../models/storeModel';
+import { filterApplicableRules } from '../rules/ruleEngine';
 import {
   createAllocation,
   getAllocationById,
@@ -61,13 +62,14 @@ router.post('/allocate', validateBody(allocateSchema), handleAsync(async (req: R
   }
 
   const relationships = getRelationshipsByScriptId(script_id);
-  const rules = getEnabledRules();
+  const allRules = getEnabledRules();
+  const applicableRules = filterApplicableRules(allRules, script.type, store_id);
 
-  const suggestion = generateAllocationSuggestion(players, characters, rules, relationships);
+  const suggestion = generateAllocationSuggestion(players, characters, applicableRules, relationships, script.type);
 
   const allocationId = createAllocation(store_id, script_id, players, suggestion, suggestion.crossGenderCount);
 
-  const topCandidates = getTopCandidates(players, characters, rules, 3);
+  const topCandidates = getTopCandidates(players, characters, applicableRules, 3);
 
   res.json({
     success: true,
@@ -91,7 +93,11 @@ router.post('/allocate', validateBody(allocateSchema), handleAsync(async (req: R
         total_score: suggestion.totalScore,
         cross_gender_count: suggestion.crossGenderCount,
         dm_tips: suggestion.dmTips,
-        relationship_highlights: suggestion.relationshipHighlights
+        relationship_highlights: suggestion.relationshipHighlights,
+        lead_recommendations: suggestion.leadRecommendations,
+        cross_gender_candidates: suggestion.crossGenderCandidates,
+        dm_communication_points: suggestion.dmCommunicationPoints,
+        applied_rules: suggestion.appliedRules
       },
       player_candidates: topCandidates
     }
@@ -123,6 +129,7 @@ router.get('/', handleAsync(async (req: Request, res: Response) => {
       cross_gender_refused: a.cross_gender_refused,
       on_site_changes: a.on_site_changes,
       status: a.status,
+      started_at: a.started_at,
       created_at: a.created_at
     }))
   });
@@ -162,6 +169,7 @@ router.get('/:id', handleAsync(async (req: Request, res: Response) => {
       cross_gender_refused: allocation.cross_gender_refused,
       on_site_changes: allocation.on_site_changes,
       status: allocation.status,
+      started_at: allocation.started_at,
       created_at: allocation.created_at
     }
   });

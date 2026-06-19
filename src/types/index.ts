@@ -54,6 +54,12 @@ export interface Player {
   cross_gender_willing?: boolean;
 }
 
+export interface RuleScope {
+  scriptTypes: ScriptType[];
+  storeIds: number[];
+  allStores: boolean;
+}
+
 export interface Rule {
   id: number;
   name: string;
@@ -62,6 +68,7 @@ export interface Rule {
   priority: number;
   enabled: number;
   config_json: string;
+  scope_json: string;
   created_at: string;
   updated_at: string;
 }
@@ -78,6 +85,35 @@ export interface PlayerScore {
   reasons: string[];
   isCrossGender: boolean;
   isLead: boolean;
+}
+
+export interface LeadRecommendation {
+  characterId: number;
+  characterName: string;
+  playerName: string;
+  score: number;
+  reasons: string[];
+  isRegular: boolean;
+}
+
+export interface CrossGenderCandidate {
+  playerId: string;
+  playerName: string;
+  originalGender: Gender;
+  targetCharacterId: number;
+  targetCharacterName: string;
+  targetGender: Gender;
+  score: number;
+  willing: boolean | undefined;
+  reasons: string[];
+}
+
+export interface DmCommunicationPoint {
+  type: 'cross_gender' | 'relationship' | 'lead_newbie' | 'low_match' | 'minor_warning';
+  priority: 'high' | 'medium' | 'low';
+  title: string;
+  detail: string;
+  involvedPlayers: string[];
 }
 
 export interface AllocationSuggestion {
@@ -97,6 +133,15 @@ export interface AllocationSuggestion {
     relationship: string;
     tip: string;
   }[];
+  leadRecommendations: LeadRecommendation[];
+  crossGenderCandidates: CrossGenderCandidate[];
+  dmCommunicationPoints: DmCommunicationPoint[];
+  appliedRules: {
+    id: number;
+    name: string;
+    code: string;
+    priority: number;
+  }[];
 }
 
 export interface AllocationRecord {
@@ -109,6 +154,7 @@ export interface AllocationRecord {
   cross_gender_refused: number;
   on_site_changes: number;
   status: string;
+  started_at: string;
   created_at: string;
 }
 
@@ -123,4 +169,20 @@ export interface StoreStats {
     scriptName: string;
     troubleCount: number;
   }[];
+}
+
+export interface TrendDataPoint {
+  date: string;
+  value: number;
+}
+
+export interface GenderTroubleScript {
+  scriptId: number;
+  scriptName: string;
+  scriptType: string;
+  allocations: number;
+  crossGenderCount: number;
+  crossGenderRefused: number;
+  onSiteChanges: number;
+  genderTroubleScore: number;
 }

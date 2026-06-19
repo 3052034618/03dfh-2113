@@ -1,12 +1,13 @@
 import { initDb, saveToDisk } from './db/database';
 import { createStore } from './models/storeModel';
-import { createScript, createCharacter, createRelationship } from './models/scriptModel';
+import { createScript, createCharacter, createRelationship, getScriptById } from './models/scriptModel';
 import { createRule, getRuleByCode } from './models/ruleModel';
 import { createAllocation, updateAllocationFeedback } from './models/allocationModel';
 import { generateAllocationSuggestion } from './services/allocationService';
 import { getEnabledRules } from './models/ruleModel';
 import { getCharactersByScriptId, getRelationshipsByScriptId } from './models/scriptModel';
-import { Player, Gender } from './types';
+import { filterApplicableRules } from './rules/ruleEngine';
+import { Player, Gender, RuleScope } from './types';
 
 function seedStores(): number[] {
   console.log('🏪 正在创建门店数据...');
@@ -124,69 +125,78 @@ function seedRules(): number {
   console.log('');
   console.log('📏 正在创建规则数据...');
 
-  const defaultRules = [
+  const defaultRules: { name: string; code: string; description: string; priority: number; config: Record<string, any>; scope: RuleScope }[] = [
     {
       name: '性别匹配优先',
       code: 'gender_match',
       description: '优先保证玩家与角色性别一致',
       priority: 80,
-      config: {}
+      config: {},
+      scope: { scriptTypes: [], storeIds: [], allStores: true }
     },
     {
       name: '未成年人不推荐重情感反串',
       code: 'minor_no_emotional_cross',
       description: '18岁以下玩家不推荐承担高情感深度的反串角色',
       priority: 90,
-      config: { ageThreshold: 18, emotionalThreshold: 4 }
+      config: { ageThreshold: 18, emotionalThreshold: 4 },
+      scope: { scriptTypes: [], storeIds: [], allStores: true }
     },
     {
       name: '恐怖本胆量匹配',
       code: 'horror_courage_match',
       description: '恐怖类型剧本优先保证玩家胆量与角色要求匹配',
       priority: 70,
-      config: { weight: 1.5 }
+      config: { weight: 1.5 },
+      scope: { scriptTypes: ['horror'], storeIds: [], allStores: true }
     },
     {
       name: '硬核本推理能力匹配',
       code: 'hardcore_reasoning_match',
       description: '硬核类型剧本优先保证玩家推理能力',
       priority: 75,
-      config: { weight: 1.5 }
+      config: { weight: 1.5 },
+      scope: { scriptTypes: ['hardcore'], storeIds: [], allStores: true }
     },
     {
       name: '情感深度匹配',
       code: 'emotional_depth_match',
       description: '情感类型剧本优先保证玩家情感承受力匹配',
       priority: 60,
-      config: { weight: 1 }
+      config: { weight: 1 },
+      scope: { scriptTypes: ['emotional'], storeIds: [], allStores: true }
     },
     {
       name: '核心角色优先分配给能力匹配者',
       code: 'lead_character_priority',
       description: '核心角色需要较高的综合能力',
       priority: 65,
-      config: { minReasoning: 4, minCourage: 3 }
+      config: { minReasoning: 4, minCourage: 3 },
+      scope: { scriptTypes: [], storeIds: [], allStores: true }
     },
     {
       name: '熟客体验优先',
       code: 'regular_customer_care',
       description: '熟客优先安排体验较好的角色',
       priority: 40,
-      config: { regularBonus: 3, regularLeadBonus: 8 }
+      config: { regularBonus: 3, regularLeadBonus: 8 },
+      scope: { scriptTypes: [], storeIds: [], allStores: true }
     },
     {
       name: '反串意愿',
       code: 'cross_gender_willingness',
       description: '考虑玩家的反串意愿',
       priority: 85,
-      config: { willingBonus: 10, unwillingPenalty: -25 }
+      config: { willingBonus: 10, unwillingPenalty: -25 },
+      scope: { scriptTypes: [], storeIds: [], allStores: true }
     },
     {
       name: '年龄适配度',
       code: 'age_appropriateness',
       description: '玩家与角色年龄接近度',
       priority: 30,
-      config: {}
+      config: {},
+      scope: { scriptTypes: [], storeIds: [], allStores: true }
     }
   ];
 
@@ -194,9 +204,9 @@ function seedRules(): number {
   for (const r of defaultRules) {
     const existing = getRuleByCode(r.code);
     if (!existing) {
-      createRule(r.name, r.code, r.description, r.priority, 1, r.config);
+      createRule(r.name, r.code, r.description, r.priority, 1, r.config, r.scope);
       count++;
-      console.log(`  ✓ ${r.name}`);
+      console.log(`  ✓ ${r.name}${r.scope.scriptTypes.length > 0 ? ` (限${r.scope.scriptTypes.join('/')})` : ''}`);
     }
   }
 
@@ -300,10 +310,14 @@ function seedSampleAllocations(storeIds: number[], scriptIds: number[]): void {
   for (const set of playersSets) {
     const storeId = storeIds[set.storeIdx];
     const scriptId = scriptIds[set.scriptIdx];
+    const script = getScriptById(scriptId);
+    if (!script) continue;
+
     const characters = getCharactersByScriptId(scriptId);
     const relationships = getRelationshipsByScriptId(scriptId);
+    const applicableRules = filterApplicableRules(rules, script.type, storeId);
 
-    const suggestion = generateAllocationSuggestion(set.players, characters, rules, relationships);
+    const suggestion = generateAllocationSuggestion(set.players, characters, applicableRules, relationships, script.type);
     const allocationId = createAllocation(storeId, scriptId, set.players, suggestion, suggestion.crossGenderCount);
     updateAllocationFeedback(allocationId, set.refused, set.changes, 'completed');
   }

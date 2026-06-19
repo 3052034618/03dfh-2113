@@ -9,8 +9,8 @@ export function createAllocation(
   crossGenderCount: number
 ): number {
   const result = runQuery(`
-    INSERT INTO allocations (store_id, script_id, players_json, suggestion_json, cross_gender_count, status)
-    VALUES (?, ?, ?, ?, ?, 'pending')
+    INSERT INTO allocations (store_id, script_id, players_json, suggestion_json, cross_gender_count, status, started_at)
+    VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
   `, [storeId, scriptId, JSON.stringify(players), JSON.stringify(suggestion), crossGenderCount]);
   return result.lastInsertRowid;
 }

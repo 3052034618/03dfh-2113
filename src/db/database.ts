@@ -81,6 +81,7 @@ export async function initDb(): Promise<void> {
       priority INTEGER DEFAULT 50,
       enabled INTEGER DEFAULT 1,
       config_json TEXT DEFAULT '{}',
+      scope_json TEXT DEFAULT '{}',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -95,6 +96,7 @@ export async function initDb(): Promise<void> {
       cross_gender_refused INTEGER DEFAULT 0,
       on_site_changes INTEGER DEFAULT 0,
       status TEXT DEFAULT 'pending',
+      started_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (store_id) REFERENCES stores(id),
       FOREIGN KEY (script_id) REFERENCES scripts(id)
@@ -118,11 +120,60 @@ export async function initDb(): Promise<void> {
     db.exec('CREATE INDEX IF NOT EXISTS idx_allocations_store ON allocations(store_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_allocations_script ON allocations(script_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_allocation_results_alloc ON allocation_results(allocation_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_allocations_started ON allocations(started_at)');
   } catch (e) {
     // ignore index errors
   }
 
+  runMigrations();
+
   startAutoSave();
+}
+
+function runMigrations(): void {
+  if (!db) return;
+
+  const hasScopeJson = columnExists('rules', 'scope_json');
+  if (!hasScopeJson) {
+    try {
+      db.exec("ALTER TABLE rules ADD COLUMN scope_json TEXT DEFAULT '{}'");
+    } catch (e) {
+      // column may already exist
+    }
+  }
+
+  const hasStartedAt = columnExists('allocations', 'started_at');
+  if (!hasStartedAt) {
+    try {
+      db.exec('ALTER TABLE allocations ADD COLUMN started_at DATETIME');
+    } catch (e) {
+      // column may already exist
+    }
+  }
+
+  try {
+    db.exec('UPDATE allocations SET started_at = created_at WHERE started_at IS NULL');
+  } catch (e) {
+    // ignore
+  }
+}
+
+function columnExists(table: string, column: string): boolean {
+  if (!db) return false;
+  try {
+    const result = db.exec(`PRAGMA table_info(${table})`);
+    if (result.length > 0) {
+      const colIdx = result[0].columns.indexOf('name');
+      if (colIdx >= 0) {
+        for (const row of result[0].values) {
+          if (row[colIdx] === column) return true;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function startAutoSave(): void {

@@ -1,5 +1,5 @@
 import { getOne, getAll, runQuery } from '../db/database';
-import { Rule, RuleConfig } from '../types';
+import { Rule, RuleConfig, RuleScope } from '../types';
 
 export function getRuleById(id: number): Rule | undefined {
   return getOne<Rule>('SELECT * FROM rules WHERE id = ?', [id]);
@@ -23,12 +23,13 @@ export function createRule(
   description: string,
   priority: number = 50,
   enabled: number = 1,
-  config: RuleConfig = {}
+  config: RuleConfig = {},
+  scope: RuleScope = { scriptTypes: [], storeIds: [], allStores: true }
 ): number {
   const result = runQuery(`
-    INSERT INTO rules (name, code, description, priority, enabled, config_json)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `, [name, code, description, priority, enabled, JSON.stringify(config)]);
+    INSERT INTO rules (name, code, description, priority, enabled, config_json, scope_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `, [name, code, description, priority, enabled, JSON.stringify(config), JSON.stringify(scope)]);
   return result.lastInsertRowid;
 }
 
@@ -40,6 +41,7 @@ export function updateRule(
     priority?: number;
     enabled?: number;
     config?: RuleConfig;
+    scope?: RuleScope;
   }
 ): boolean {
   const current = getRuleById(id);
@@ -50,11 +52,12 @@ export function updateRule(
   const priority = options.priority ?? current.priority;
   const enabled = options.enabled ?? current.enabled;
   const config = options.config ? JSON.stringify(options.config) : current.config_json;
+  const scope = options.scope ? JSON.stringify(options.scope) : current.scope_json;
 
   const result = runQuery(`
-    UPDATE rules SET name = ?, description = ?, priority = ?, enabled = ?, config_json = ?, updated_at = CURRENT_TIMESTAMP
+    UPDATE rules SET name = ?, description = ?, priority = ?, enabled = ?, config_json = ?, scope_json = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `, [name, description, priority, enabled, config, id]);
+  `, [name, description, priority, enabled, config, scope, id]);
   return result.changes > 0;
 }
 
@@ -68,5 +71,18 @@ export function parseRuleConfig(rule: Rule): RuleConfig {
     return JSON.parse(rule.config_json);
   } catch {
     return {};
+  }
+}
+
+export function parseRuleScope(rule: Rule): RuleScope {
+  try {
+    const parsed = JSON.parse(rule.scope_json || '{}');
+    return {
+      scriptTypes: parsed.scriptTypes || [],
+      storeIds: parsed.storeIds || [],
+      allStores: parsed.allStores !== undefined ? parsed.allStores : true
+    };
+  } catch {
+    return { scriptTypes: [], storeIds: [], allStores: true };
   }
 }

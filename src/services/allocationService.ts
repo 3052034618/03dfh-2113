@@ -1,12 +1,5 @@
-import { Player, Character, Rule, AllocationSuggestion, CharacterRelationship } from '../types';
+import { Player, Character, Rule, AllocationSuggestion, CharacterRelationship, ScriptType, DmCommunicationPoint, LeadRecommendation, CrossGenderCandidate } from '../types';
 import { evaluatePlayerCharacterPair } from '../rules/ruleEngine';
-
-interface Assignment {
-  playerIndex: number;
-  characterIndex: number;
-  score: number;
-  reasons: string[];
-}
 
 function permute(arr: number[]): number[][] {
   if (arr.length <= 1) return [arr];
@@ -25,7 +18,8 @@ export function generateAllocationSuggestion(
   players: Player[],
   characters: Character[],
   rules: Rule[],
-  relationships: CharacterRelationship[]
+  relationships: CharacterRelationship[],
+  scriptType: ScriptType
 ): AllocationSuggestion {
   const n = Math.min(players.length, characters.length);
 
@@ -35,7 +29,11 @@ export function generateAllocationSuggestion(
       totalScore: 0,
       crossGenderCount: 0,
       dmTips: [],
-      relationshipHighlights: []
+      relationshipHighlights: [],
+      leadRecommendations: [],
+      crossGenderCandidates: [],
+      dmCommunicationPoints: [],
+      appliedRules: rules.map(r => ({ id: r.id, name: r.name, code: r.code, priority: r.priority }))
     };
   }
 
@@ -132,13 +130,20 @@ export function generateAllocationSuggestion(
 
   const dmTips = generateDmTips(assignments, characters, rules);
   const relationshipHighlights = generateRelationshipHighlights(assignments, relationships, characters);
+  const leadRecommendations = generateLeadRecommendations(assignments);
+  const crossGenderCandidates = generateCrossGenderCandidates(players, characters, rules);
+  const dmCommunicationPoints = generateDmCommunicationPoints(assignments, relationshipHighlights, scriptType);
 
   return {
     assignments,
     totalScore: Math.round(bestScore * 100) / 100,
     crossGenderCount,
     dmTips,
-    relationshipHighlights
+    relationshipHighlights,
+    leadRecommendations,
+    crossGenderCandidates,
+    dmCommunicationPoints,
+    appliedRules: rules.map(r => ({ id: r.id, name: r.name, code: r.code, priority: r.priority }))
   };
 }
 
@@ -253,6 +258,132 @@ function generateRelationshipHighlights(
   }
 
   return highlights;
+}
+
+function generateLeadRecommendations(
+  assignments: AllocationSuggestion['assignments']
+): LeadRecommendation[] {
+  return assignments
+    .filter(a => a.character.is_lead === 1)
+    .map(a => ({
+      characterId: a.character.id,
+      characterName: a.character.name,
+      playerName: a.player.name,
+      score: a.score,
+      reasons: a.reasons.filter(r =>
+        r.includes('核心角色') || r.includes('推理') || r.includes('胆量') || r.includes('熟客')
+      ),
+      isRegular: a.player.is_regular || false
+    }));
+}
+
+function generateCrossGenderCandidates(
+  players: Player[],
+  characters: Character[],
+  rules: Rule[]
+): CrossGenderCandidate[] {
+  const candidates: CrossGenderCandidate[] = [];
+
+  for (const player of players) {
+    for (const character of characters) {
+      if (player.gender !== character.gender && player.gender !== 'other' && character.gender !== 'other') {
+        const evalResult = evaluatePlayerCharacterPair(player, character, rules);
+        candidates.push({
+          playerId: player.name,
+          playerName: player.name,
+          originalGender: player.gender,
+          targetCharacterId: character.id,
+          targetCharacterName: character.name,
+          targetGender: character.gender,
+          score: evalResult.score,
+          willing: player.cross_gender_willing,
+          reasons: evalResult.reasons.filter(r =>
+            r.includes('反串') || r.includes('胆量') || r.includes('推理') || r.includes('情感') || r.includes('性别')
+          )
+        });
+      }
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates.slice(0, 10);
+}
+
+function generateDmCommunicationPoints(
+  assignments: AllocationSuggestion['assignments'],
+  relationshipHighlights: AllocationSuggestion['relationshipHighlights'],
+  scriptType: ScriptType
+): DmCommunicationPoint[] {
+  const points: DmCommunicationPoint[] = [];
+
+  const crossGender = assignments.filter(a => a.isCrossGender);
+  for (const a of crossGender) {
+    const priority: 'high' | 'medium' | 'low' = a.player.cross_gender_willing === false ? 'high'
+      : a.player.cross_gender_willing === true ? 'low' : 'medium';
+    points.push({
+      type: 'cross_gender',
+      priority,
+      title: `反串确认：${a.player.name} → ${a.character.name}`,
+      detail: `${a.player.name}（${a.player.gender === 'male' ? '男' : '女'}）被分配到${a.character.gender === 'male' ? '男' : '女'}角色${a.character.name}${a.player.cross_gender_willing === false ? '，玩家已表示不愿意反串' : a.player.cross_gender_willing === true ? '，玩家自愿反串' : '，需确认反串意愿'}`,
+      involvedPlayers: [a.player.name]
+    });
+  }
+
+  for (const a of assignments) {
+    if (a.character.is_lead && !a.player.is_regular) {
+      const minorWarning = a.player.age !== undefined && a.player.age < 18;
+      if (minorWarning) {
+        points.push({
+          type: 'minor_warning',
+          priority: 'high',
+          title: `未成年人核心角色：${a.player.name} → ${a.character.name}`,
+          detail: `${a.player.name}（${a.player.age}岁）被分配到核心角色${a.character.name}，需确认是否适合`,
+          involvedPlayers: [a.player.name]
+        });
+      } else {
+        points.push({
+          type: 'lead_newbie',
+          priority: 'medium',
+          title: `新手核心角色：${a.player.name} → ${a.character.name}`,
+          detail: `${a.player.name}是新手，被分配到核心角色${a.character.name}，DM需注意引导`,
+          involvedPlayers: [a.player.name]
+        });
+      }
+    }
+  }
+
+  for (const a of assignments) {
+    if (a.score < 10 && !a.isCrossGender) {
+      points.push({
+        type: 'low_match',
+        priority: 'low',
+        title: `匹配度偏低：${a.player.name} → ${a.character.name}`,
+        detail: `该配对得分${a.score.toFixed(1)}，可能影响体验，DM需多关注`,
+        involvedPlayers: [a.player.name]
+      });
+    }
+  }
+
+  for (const rel of relationshipHighlights) {
+    const typeLabel = scriptType === 'emotional' ? '情感本' : scriptType === 'horror' ? '恐怖本' : scriptType === 'hardcore' ? '硬核本' : '剧本';
+    const isEmotionalRel = ['情侣', '恋人', '亲属', '家人', '姐妹', '兄弟'].includes(rel.relationship);
+    const priority: 'high' | 'medium' | 'low' = isEmotionalRel && scriptType === 'emotional' ? 'high' : 'medium';
+
+    points.push({
+      type: 'relationship',
+      priority,
+      title: `${typeLabel}关系线：${rel.characterA} ↔ ${rel.characterB}（${rel.relationship}）`,
+      detail: rel.tip,
+      involvedPlayers: []
+    });
+  }
+
+  points.sort((a, b) => {
+    const priorityOrder = { high: 0, medium: 1, low: 2 };
+    return priorityOrder[a.priority] - priorityOrder[b.priority];
+  });
+
+  return points;
 }
 
 export function getTopCandidates(
