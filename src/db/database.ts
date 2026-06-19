@@ -133,6 +133,31 @@ export async function initDb(): Promise<void> {
       detail_json TEXT DEFAULT '{}',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS rule_release_plans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_code TEXT NOT NULL,
+      rule_id INTEGER NOT NULL,
+      rule_version INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      release_type TEXT NOT NULL DEFAULT 'full',
+      gray_store_ids_json TEXT DEFAULT '[]',
+      scheduled_at DATETIME,
+      submitted_by TEXT,
+      submitted_at DATETIME,
+      approved_by TEXT,
+      approved_at DATETIME,
+      published_by TEXT,
+      published_at DATETIME,
+      cancelled_by TEXT,
+      cancelled_at DATETIME,
+      paused_by TEXT,
+      paused_at DATETIME,
+      review_comment TEXT,
+      cancel_reason TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   try {
@@ -144,6 +169,9 @@ export async function initDb(): Promise<void> {
     db.exec('CREATE INDEX IF NOT EXISTS idx_rule_audit_code ON rule_audit_logs(rule_code)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_rule_audit_action ON rule_audit_logs(action)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_rule_audit_created ON rule_audit_logs(created_at)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_release_plans_code ON rule_release_plans(rule_code)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_release_plans_status ON rule_release_plans(status)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_release_plans_scheduled ON rule_release_plans(scheduled_at)');
   } catch (e) {
     // ignore index errors
   }

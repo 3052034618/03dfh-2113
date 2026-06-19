@@ -1,5 +1,5 @@
 import { getOne, getAll, runQuery } from '../db/database';
-import { Rule, RuleConfig, RuleScope, RuleStatus, RuleAuditLog, RuleAuditAction } from '../types';
+import { Rule, RuleConfig, RuleScope, RuleStatus, RuleAuditLog, RuleAuditAction, ReleasePlan, ReleasePlanStatus, ReleaseType } from '../types';
 
 export function getRuleById(id: number): Rule | undefined {
   return getOne<Rule>('SELECT * FROM rules WHERE id = ?', [id]);
@@ -479,4 +479,312 @@ export function parseGrayStoreIds(rule: Rule): number[] {
   } catch {
     return [];
   }
+}
+
+function parseReleasePlan(row: any): ReleasePlan {
+  return {
+    id: row.id,
+    ruleCode: row.rule_code,
+    ruleId: row.rule_id,
+    ruleVersion: row.rule_version,
+    status: row.status as ReleasePlanStatus,
+    releaseType: row.release_type as ReleaseType,
+    grayStoreIds: (() => {
+      try { return JSON.parse(row.gray_store_ids_json || '[]'); }
+      catch { return []; }
+    })(),
+    scheduledAt: row.scheduled_at ?? undefined,
+    submittedBy: row.submitted_by ?? undefined,
+    submittedAt: row.submitted_at ?? undefined,
+    approvedBy: row.approved_by ?? undefined,
+    approvedAt: row.approved_at ?? undefined,
+    publishedBy: row.published_by ?? undefined,
+    publishedAt: row.published_at ?? undefined,
+    cancelledBy: row.cancelled_by ?? undefined,
+    cancelledAt: row.cancelled_at ?? undefined,
+    pausedBy: row.paused_by ?? undefined,
+    pausedAt: row.paused_at ?? undefined,
+    reviewComment: row.review_comment ?? undefined,
+    cancelReason: row.cancel_reason ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getReleasePlanById(id: number): ReleasePlan | undefined {
+  const row = getOne<any>('SELECT * FROM rule_release_plans WHERE id = ?', [id]);
+  return row ? parseReleasePlan(row) : undefined;
+}
+
+export function getReleasePlans(options?: {
+  ruleCode?: string;
+  status?: ReleasePlanStatus;
+  limit?: number;
+}): ReleasePlan[] {
+  const conditions: string[] = [];
+  const params: any[] = [];
+  if (options?.ruleCode) {
+    conditions.push('rule_code = ?');
+    params.push(options.ruleCode);
+  }
+  if (options?.status) {
+    conditions.push('status = ?');
+    params.push(options.status);
+  }
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const limit = options?.limit ? `LIMIT ${options.limit}` : '';
+  const rows = getAll<any>(`
+    SELECT * FROM rule_release_plans
+    ${where}
+    ORDER BY id DESC
+    ${limit}
+  `, params);
+  return rows.map(parseReleasePlan);
+}
+
+export function getReleasePlansByCode(code: string): ReleasePlan[] {
+  return getReleasePlans({ ruleCode: code });
+}
+
+export function createReleasePlan(
+  ruleId: number,
+  options: {
+    releaseType: ReleaseType;
+    grayStoreIds?: number[];
+    scheduledAt?: string;
+  },
+  operator: string = 'admin'
+): number {
+  const rule = getRuleById(ruleId);
+  if (!rule) throw new Error(`Rule ${ruleId} not found`);
+  if (rule.status === 'published') throw new Error('已发布版本不能再创建发布计划');
+
+  const grayStoreIds = options.grayStoreIds ?? [];
+  const status: ReleasePlanStatus = options.scheduledAt ? 'scheduled' : 'draft';
+
+  const result = runQuery(`
+    INSERT INTO rule_release_plans (rule_code, rule_id, rule_version, status, release_type, gray_store_ids_json, scheduled_at, submitted_by, submitted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    rule.code, ruleId, rule.version, status, options.releaseType,
+    JSON.stringify(grayStoreIds),
+    options.scheduledAt ?? null,
+    status !== 'draft' ? operator : null,
+    status !== 'draft' ? new Date().toISOString() : null,
+  ]);
+
+  const planId = result.lastInsertRowid;
+
+  if (status === 'scheduled') {
+    createAuditLog(rule.code, 'schedule_release', operator, {
+      ruleId,
+      ruleVersion: rule.version,
+      oldStatus: undefined,
+      newStatus: undefined,
+      affectedStoreIds: options.releaseType === 'gray' ? grayStoreIds : [],
+      detail: { planId, releaseType: options.releaseType, scheduledAt: options.scheduledAt }
+    });
+  }
+
+  return planId;
+}
+
+export function submitReleasePlan(planId: number, operator: string = 'admin'): boolean {
+  const plan = getReleasePlanById(planId);
+  if (!plan) return false;
+  if (plan.status !== 'draft') throw new Error('只有草稿状态可以提交审核');
+
+  const result = runQuery(`
+    UPDATE rule_release_plans SET status = 'submitted', submitted_by = ?, submitted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [operator, planId]);
+
+  if (result.changes > 0) {
+    createAuditLog(plan.ruleCode, 'submit_review', operator, {
+      ruleId: plan.ruleId,
+      ruleVersion: plan.ruleVersion,
+      oldStatus: undefined,
+      newStatus: undefined,
+      affectedStoreIds: plan.releaseType === 'gray' ? plan.grayStoreIds : [],
+      detail: { planId, releaseType: plan.releaseType }
+    });
+  }
+  return result.changes > 0;
+}
+
+export function approveReleasePlan(planId: number, operator: string = 'admin', reviewComment?: string): boolean {
+  const plan = getReleasePlanById(planId);
+  if (!plan) return false;
+  if (plan.status !== 'submitted') throw new Error('只有待审核状态可以审批');
+
+  const newStatus: ReleasePlanStatus = plan.scheduledAt ? 'scheduled' : 'approved';
+
+  const result = runQuery(`
+    UPDATE rule_release_plans SET status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP, review_comment = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [newStatus, operator, reviewComment ?? null, planId]);
+
+  if (result.changes > 0) {
+    createAuditLog(plan.ruleCode, 'approve_release', operator, {
+      ruleId: plan.ruleId,
+      ruleVersion: plan.ruleVersion,
+      oldStatus: undefined,
+      newStatus: undefined,
+      affectedStoreIds: plan.releaseType === 'gray' ? plan.grayStoreIds : [],
+      detail: { planId, releaseType: plan.releaseType, reviewComment, scheduledAt: plan.scheduledAt }
+    });
+  }
+  return result.changes > 0;
+}
+
+export function rejectReleasePlan(planId: number, operator: string = 'admin', reviewComment?: string): boolean {
+  const plan = getReleasePlanById(planId);
+  if (!plan) return false;
+  if (plan.status !== 'submitted') throw new Error('只有待审核状态可以拒绝');
+
+  const result = runQuery(`
+    UPDATE rule_release_plans SET status = 'rejected', approved_by = ?, approved_at = CURRENT_TIMESTAMP, review_comment = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [operator, reviewComment ?? null, planId]);
+
+  if (result.changes > 0) {
+    createAuditLog(plan.ruleCode, 'reject_release', operator, {
+      ruleId: plan.ruleId,
+      ruleVersion: plan.ruleVersion,
+      oldStatus: undefined,
+      newStatus: undefined,
+      affectedStoreIds: [],
+      detail: { planId, releaseType: plan.releaseType, reviewComment }
+    });
+  }
+  return result.changes > 0;
+}
+
+export function scheduleReleasePlan(planId: number, scheduledAt: string, operator: string = 'admin'): boolean {
+  const plan = getReleasePlanById(planId);
+  if (!plan) return false;
+  if (!['draft', 'approved', 'paused'].includes(plan.status)) {
+    throw new Error('草稿/已审批/暂停状态才能设置定时发布');
+  }
+
+  const result = runQuery(`
+    UPDATE rule_release_plans SET status = 'scheduled', scheduled_at = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [scheduledAt, planId]);
+
+  if (result.changes > 0) {
+    createAuditLog(plan.ruleCode, 'schedule_release', operator, {
+      ruleId: plan.ruleId,
+      ruleVersion: plan.ruleVersion,
+      oldStatus: undefined,
+      newStatus: undefined,
+      affectedStoreIds: plan.releaseType === 'gray' ? plan.grayStoreIds : [],
+      detail: { planId, scheduledAt }
+    });
+  }
+  return result.changes > 0;
+}
+
+export function pauseReleasePlan(planId: number, operator: string = 'admin'): boolean {
+  const plan = getReleasePlanById(planId);
+  if (!plan) return false;
+  if (plan.status !== 'scheduled') throw new Error('只有定时发布中才能暂停');
+
+  const result = runQuery(`
+    UPDATE rule_release_plans SET status = 'paused', paused_by = ?, paused_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [operator, planId]);
+
+  if (result.changes > 0) {
+    createAuditLog(plan.ruleCode, 'pause_release', operator, {
+      ruleId: plan.ruleId,
+      ruleVersion: plan.ruleVersion,
+      oldStatus: undefined,
+      newStatus: undefined,
+      affectedStoreIds: plan.releaseType === 'gray' ? plan.grayStoreIds : [],
+      detail: { planId }
+    });
+  }
+  return result.changes > 0;
+}
+
+export function resumeReleasePlan(planId: number, operator: string = 'admin'): boolean {
+  const plan = getReleasePlanById(planId);
+  if (!plan) return false;
+  if (plan.status !== 'paused') throw new Error('只有暂停状态才能恢复');
+
+  const result = runQuery(`
+    UPDATE rule_release_plans SET status = 'scheduled', updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [planId]);
+
+  if (result.changes > 0) {
+    createAuditLog(plan.ruleCode, 'resume_release', operator, {
+      ruleId: plan.ruleId,
+      ruleVersion: plan.ruleVersion,
+      oldStatus: undefined,
+      newStatus: undefined,
+      affectedStoreIds: plan.releaseType === 'gray' ? plan.grayStoreIds : [],
+      detail: { planId, scheduledAt: plan.scheduledAt }
+    });
+  }
+  return result.changes > 0;
+}
+
+export function cancelReleasePlan(planId: number, operator: string = 'admin', cancelReason?: string): boolean {
+  const plan = getReleasePlanById(planId);
+  if (!plan) return false;
+  if (['published', 'cancelled'].includes(plan.status)) throw new Error('已发布或已取消的计划不能再取消');
+
+  const result = runQuery(`
+    UPDATE rule_release_plans SET status = 'cancelled', cancelled_by = ?, cancelled_at = CURRENT_TIMESTAMP, cancel_reason = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `, [operator, cancelReason ?? null, planId]);
+
+  if (result.changes > 0) {
+    createAuditLog(plan.ruleCode, 'cancel_release', operator, {
+      ruleId: plan.ruleId,
+      ruleVersion: plan.ruleVersion,
+      oldStatus: undefined,
+      newStatus: undefined,
+      affectedStoreIds: plan.releaseType === 'gray' ? plan.grayStoreIds : [],
+      detail: { planId, cancelReason }
+    });
+  }
+  return result.changes > 0;
+}
+
+export function executeReleasePlan(planId: number, operator: string = 'admin'): boolean {
+  const plan = getReleasePlanById(planId);
+  if (!plan) return false;
+  if (!['approved', 'scheduled', 'paused'].includes(plan.status)) {
+    throw new Error(`状态 ${plan.status} 不能执行发布`);
+  }
+
+  const rule = getRuleById(plan.ruleId);
+  if (!rule) return false;
+
+  const publishOk = publishVersion(
+    plan.ruleId,
+    plan.releaseType === 'gray' ? { grayStoreIds: plan.grayStoreIds } : {},
+    operator
+  );
+
+  if (publishOk) {
+    runQuery(`
+      UPDATE rule_release_plans SET status = 'published', published_by = ?, published_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [operator, planId]);
+  }
+
+  return publishOk;
+}
+
+export function getScheduledPlansDue(now: string = new Date().toISOString()): ReleasePlan[] {
+  const rows = getAll<any>(`
+    SELECT * FROM rule_release_plans
+    WHERE status = 'scheduled' AND scheduled_at <= ?
+    ORDER BY scheduled_at ASC
+  `, [now]);
+  return rows.map(parseReleasePlan);
 }

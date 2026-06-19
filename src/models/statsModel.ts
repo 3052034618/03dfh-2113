@@ -1,5 +1,7 @@
 import { getAll, getOne } from '../db/database';
-import { StoreStats, TrendDataPoint, GenderTroubleScript, FilterMeta, ComparisonResult, MetricChange, ScriptTroubleChange } from '../types';
+import { StoreStats, TrendDataPoint, GenderTroubleScript, FilterMeta, ComparisonResult, MetricChange, ScriptTroubleChange, GrayEffectBoard } from '../types';
+import { parseGrayStoreIds, getActiveRulesForStore } from './ruleModel';
+import { getAllStores, getStoreById } from './storeModel';
 
 export interface StatsFilters {
   storeId?: number;
@@ -491,4 +493,214 @@ export function compareStatsByStore(
   const filtersA: StatsFilters = { ...commonFilters, storeId: storeIdA };
   const filtersB: StatsFilters = { ...commonFilters, storeId: storeIdB };
   return compareStatsByPeriod(filtersA, filtersB);
+}
+
+function getGroupMetrics(storeIds: number[], days: number): {
+  totalAllocations: number;
+  crossGenderRefusalRate: number;
+  averageOnSiteChanges: number;
+} {
+  if (storeIds.length === 0) {
+    return { totalAllocations: 0, crossGenderRefusalRate: 0, averageOnSiteChanges: 0 };
+  }
+  const placeholders = storeIds.map(() => '?').join(',');
+  const params = [...storeIds];
+  const row = getOne<any>(`
+    SELECT
+      COUNT(*) as total_allocations,
+      AVG(CASE WHEN cross_gender_count > 0 THEN CAST(cross_gender_refused AS FLOAT) / cross_gender_count ELSE 0 END) as refusal_rate,
+      AVG(on_site_changes) as avg_on_site_changes
+    FROM allocations a
+    WHERE a.status = 'completed'
+      AND a.store_id IN (${placeholders})
+      AND a.started_at >= datetime('now', '-${days} days')
+  `, params);
+  return {
+    totalAllocations: row?.total_allocations || 0,
+    crossGenderRefusalRate: row?.refusal_rate || 0,
+    averageOnSiteChanges: row?.avg_on_site_changes || 0,
+  };
+}
+
+function getGroupTroubledScripts(storeIds: number[], days: number, limit: number = 5): GenderTroubleScript[] {
+  if (storeIds.length === 0) return [];
+  const placeholders = storeIds.map(() => '?').join(',');
+  const params = [...storeIds, limit];
+  const rows = getAll<{
+    script_id: number;
+    script_name: string;
+    script_type: string;
+    allocations: number;
+    cross_gender_count: number;
+    cross_gender_refused: number;
+    on_site_changes: number;
+  }>(`
+    SELECT
+      s.id as script_id,
+      s.name as script_name,
+      s.type as script_type,
+      COUNT(a.id) as allocations,
+      COALESCE(SUM(a.cross_gender_count), 0) as cross_gender_count,
+      COALESCE(SUM(a.cross_gender_refused), 0) as cross_gender_refused,
+      COALESCE(SUM(a.on_site_changes), 0) as on_site_changes
+    FROM scripts s
+    INNER JOIN allocations a ON a.script_id = s.id
+      AND a.status = 'completed'
+      AND a.store_id IN (${placeholders})
+      AND a.started_at >= datetime('now', '-${days} days')
+    GROUP BY s.id
+    HAVING cross_gender_count > 0 OR on_site_changes > 0
+    ORDER BY (COALESCE(SUM(a.cross_gender_refused), 0) * 2 + COALESCE(SUM(a.on_site_changes), 0)) DESC
+    LIMIT ?
+  `, params);
+  return rows.map(r => ({
+    scriptId: r.script_id,
+    scriptName: r.script_name,
+    scriptType: r.script_type,
+    allocations: r.allocations,
+    crossGenderCount: r.cross_gender_count,
+    crossGenderRefused: r.cross_gender_refused,
+    onSiteChanges: r.on_site_changes,
+    genderTroubleScore: Math.round((r.cross_gender_refused * 2 + r.on_site_changes) * 100) / 100
+  }));
+}
+
+function buildHitRuleVersions(storeId: number): { code: string; version: number; name: string }[] {
+  const rules = getActiveRulesForStore(storeId);
+  return rules.map(r => ({ code: r.code, version: r.version, name: r.name }));
+}
+
+function generateGrayInsights(
+  grayMetrics: { totalAllocations: number; crossGenderRefusalRate: number; averageOnSiteChanges: number },
+  controlMetrics: { totalAllocations: number; crossGenderRefusalRate: number; averageOnSiteChanges: number },
+  refusalRateDiff: MetricChange,
+  onSiteChangesDiff: MetricChange,
+  ruleName: string,
+  ruleVersion: number
+): string[] {
+  const insights: string[] = [];
+  const ruleLabel = `${ruleName} v${ruleVersion}`;
+
+  if (grayMetrics.totalAllocations === 0 && controlMetrics.totalAllocations === 0) {
+    insights.push(`两组门店在统计周期内均无场次数据，建议扩大统计范围或检查灰度门店配置`);
+    return insights;
+  }
+  if (grayMetrics.totalAllocations === 0) {
+    insights.push(`灰度组门店暂无场次数据，无法评估${ruleLabel}的实际效果`);
+    return insights;
+  }
+  if (controlMetrics.totalAllocations === 0) {
+    insights.push(`控制组门店暂无场次数据，对比参考意义有限`);
+  }
+
+  if (Math.abs(refusalRateDiff.diffPct) >= 10) {
+    if (refusalRateDiff.diff < 0) {
+      insights.push(`${ruleLabel} 灰度效果显著：反串拒绝率下降 ${Math.abs(refusalRateDiff.diffPct).toFixed(1)}%，规则对降低性别冲突有明显帮助`);
+    } else {
+      insights.push(`${ruleLabel} 灰度效果不佳：反串拒绝率上升 ${refusalRateDiff.diffPct.toFixed(1)}%，建议评估是否回滚或调整规则参数`);
+    }
+  } else {
+    insights.push(`${ruleLabel} 对反串拒绝率影响不大（波动 ${Math.abs(refusalRateDiff.diffPct).toFixed(1)}%），属于可接受范围`);
+  }
+
+  if (Math.abs(onSiteChangesDiff.diffPct) >= 10) {
+    if (onSiteChangesDiff.diff < 0) {
+      insights.push(`临场换角次数下降 ${Math.abs(onSiteChangesDiff.diffPct).toFixed(1)}%，说明${ruleLabel}提升了分角准确度`);
+    } else {
+      insights.push(`临场换角次数上升 ${onSiteChangesDiff.diffPct.toFixed(1)}%，需关注${ruleLabel}是否导致分角稳定性下降`);
+    }
+  }
+
+  if (refusalRateDiff.diff < 0 && onSiteChangesDiff.diff < 0) {
+    insights.push(`综合来看，${ruleLabel}灰度效果正面，建议逐步扩大灰度范围或全量发布`);
+  } else if (refusalRateDiff.diff > 0 && onSiteChangesDiff.diff > 0) {
+    insights.push(`综合来看，${ruleLabel}灰度效果不达预期，建议回滚或优化后再试`);
+  }
+
+  if (insights.length < 2) {
+    insights.push(`灰度期内两组门店核心指标相对稳定，建议继续观察积累更多数据`);
+  }
+
+  return insights.slice(0, 4);
+}
+
+export function getGrayEffectBoard(ruleCode: string, days: number = 30): GrayEffectBoard | null {
+  const grayRule = getOne<any>(
+    "SELECT * FROM rules WHERE code = ? AND status = 'gray' ORDER BY version DESC LIMIT 1",
+    [ruleCode]
+  );
+  if (!grayRule) return null;
+
+  const grayStoreIds = parseGrayStoreIds(grayRule);
+  const allStores = getAllStores();
+  const allStoreIds = allStores.map(s => s.id);
+  const controlStoreIds = allStoreIds.filter(id => !grayStoreIds.includes(id));
+
+  const grayStoreNames = grayStoreIds
+    .map(id => getStoreById(id)?.name || `门店#${id}`);
+  const controlStoreNames = controlStoreIds
+    .map(id => getStoreById(id)?.name || `门店#${id}`);
+
+  const grayMetrics = getGroupMetrics(grayStoreIds, days);
+  const controlMetrics = getGroupMetrics(controlStoreIds, days);
+
+  const grayTroubled = getGroupTroubledScripts(grayStoreIds, days, 5);
+  const controlTroubled = getGroupTroubledScripts(controlStoreIds, days, 5);
+
+  const refusalRateDiff = makeMetricChange(controlMetrics.crossGenderRefusalRate, grayMetrics.crossGenderRefusalRate);
+  const onSiteChangesDiff = makeMetricChange(controlMetrics.averageOnSiteChanges, grayMetrics.averageOnSiteChanges);
+  const totalAllocationsDiff = makeMetricChange(controlMetrics.totalAllocations, grayMetrics.totalAllocations);
+
+  const graySampleStoreId = grayStoreIds[0];
+  const controlSampleStoreId = controlStoreIds[0];
+  const hitRuleVersions = {
+    gray: graySampleStoreId ? buildHitRuleVersions(graySampleStoreId) : [],
+    control: controlSampleStoreId ? buildHitRuleVersions(controlSampleStoreId) : [],
+  };
+
+  const insights = generateGrayInsights(
+    grayMetrics,
+    controlMetrics,
+    refusalRateDiff,
+    onSiteChangesDiff,
+    grayRule.name,
+    grayRule.version
+  );
+
+  const filterDescription = `${grayRule.name} v${grayRule.version} 灰度效果对比：${grayStoreIds.length} 家灰度门店 vs ${controlStoreIds.length} 家对照门店，最近 ${days} 天`;
+
+  return {
+    meta: {
+      ruleCode,
+      ruleVersion: grayRule.version,
+      ruleName: grayRule.name,
+      grayStoreCount: grayStoreIds.length,
+      controlStoreCount: controlStoreIds.length,
+      days,
+      filterDescription,
+    },
+    grayGroup: {
+      storeIds: grayStoreIds,
+      storeNames: grayStoreNames,
+      totalAllocations: grayMetrics.totalAllocations,
+      crossGenderRefusalRate: grayMetrics.crossGenderRefusalRate,
+      averageOnSiteChanges: grayMetrics.averageOnSiteChanges,
+      troubledScripts: grayTroubled,
+    },
+    controlGroup: {
+      storeIds: controlStoreIds,
+      storeNames: controlStoreNames,
+      totalAllocations: controlMetrics.totalAllocations,
+      crossGenderRefusalRate: controlMetrics.crossGenderRefusalRate,
+      averageOnSiteChanges: controlMetrics.averageOnSiteChanges,
+      troubledScripts: controlTroubled,
+    },
+    diff: {
+      crossGenderRefusalRate: refusalRateDiff,
+      averageOnSiteChanges: onSiteChangesDiff,
+      totalAllocations: totalAllocationsDiff,
+    },
+    hitRuleVersions,
+    insights,
+  };
 }

@@ -170,29 +170,6 @@ export interface AllocationSuggestion {
   }[];
 }
 
-export interface SimulationDiff {
-  roleChanges: {
-    playerName: string;
-    fromCharacter: string;
-    toCharacter: string;
-  }[];
-  crossGenderCountDiff: number;
-  totalScoreDiff: number;
-  ruleVersionDiff: {
-    added: { code: string; version: number }[];
-    removed: { code: string; version: number }[];
-    changed: { code: string; fromVersion: number; toVersion: number }[];
-  };
-}
-
-export interface SimulationResult {
-  current: AllocationSuggestion;
-  draft?: AllocationSuggestion;
-  specified?: AllocationSuggestion;
-  diffCurrentVsDraft?: SimulationDiff;
-  diffCurrentVsSpecified?: SimulationDiff;
-}
-
 export interface AllocationRecord {
   id: number;
   store_id: number;
@@ -237,7 +214,113 @@ export interface GenderTroubleScript {
   genderTroubleScore: number;
 }
 
-export type RuleAuditAction = 'create_version' | 'publish_gray' | 'publish_full' | 'rollback' | 'archive' | 'update';
+export type RuleAuditAction = 'create_version' | 'publish_gray' | 'publish_full' | 'rollback' | 'archive' | 'update' | 'submit_review' | 'approve_release' | 'reject_release' | 'schedule_release' | 'cancel_release' | 'pause_release' | 'resume_release';
+
+export type ReleasePlanStatus = 'draft' | 'submitted' | 'approved' | 'scheduled' | 'published' | 'paused' | 'cancelled' | 'rejected';
+
+export type ReleaseType = 'full' | 'gray';
+
+export interface ReleasePlan {
+  id: number;
+  ruleCode: string;
+  ruleId: number;
+  ruleVersion: number;
+  status: ReleasePlanStatus;
+  releaseType: ReleaseType;
+  grayStoreIds: number[];
+  scheduledAt?: string;
+  submittedBy?: string;
+  submittedAt?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  publishedBy?: string;
+  publishedAt?: string;
+  cancelledBy?: string;
+  cancelledAt?: string;
+  pausedBy?: string;
+  pausedAt?: string;
+  reviewComment?: string;
+  cancelReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GrayEffectBoard {
+  meta: {
+    ruleCode: string;
+    ruleVersion: number;
+    ruleName: string;
+    grayStoreCount: number;
+    controlStoreCount: number;
+    days: number;
+    filterDescription: string;
+  };
+  grayGroup: {
+    storeIds: number[];
+    storeNames: string[];
+    totalAllocations: number;
+    crossGenderRefusalRate: number;
+    averageOnSiteChanges: number;
+    troubledScripts: GenderTroubleScript[];
+  };
+  controlGroup: {
+    storeIds: number[];
+    storeNames: string[];
+    totalAllocations: number;
+    crossGenderRefusalRate: number;
+    averageOnSiteChanges: number;
+    troubledScripts: GenderTroubleScript[];
+  };
+  diff: {
+    crossGenderRefusalRate: MetricChange;
+    averageOnSiteChanges: MetricChange;
+    totalAllocations: MetricChange;
+  };
+  hitRuleVersions: {
+    gray: { code: string; version: number; name: string }[];
+    control: { code: string; version: number; name: string }[];
+  };
+  insights: string[];
+}
+
+export interface BatchSimGroup {
+  groupId: string;
+  groupName: string;
+  storeId?: number;
+  scriptId: number;
+  players: Player[];
+}
+
+export interface BatchSimResultItem {
+  groupId: string;
+  groupName: string;
+  storeId?: number;
+  scriptId: number;
+  scriptName: string;
+  totalScore: number;
+  crossGenderCount: number;
+  scoreDiffVsBaseline: number;
+  crossGenderDiffVsBaseline: number;
+  hitRuleVersions: { code: string; version: number; name: string }[];
+  riskTips: string[];
+  roleChangesCount: number;
+  playerScoreDiffs: PlayerScoreDiff[];
+}
+
+export interface BatchSimResult {
+  baselineStoreId: number;
+  compareMode: 'draft' | 'specified' | 'gray';
+  groups: BatchSimResultItem[];
+  overallSummary: {
+    totalGroups: number;
+    improvedCount: number;
+    declinedCount: number;
+    avgScoreDiff: number;
+    avgCrossGenderDiff: number;
+    highRiskCount: number;
+  };
+  overallInsights: string[];
+}
 
 export interface RuleAuditLog {
   id: number;

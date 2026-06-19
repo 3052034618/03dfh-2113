@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { validateBody, handleAsync } from '../middleware/validation';
-import { generateAllocationSuggestion, getTopCandidates, simulateAllocation } from '../services/allocationService';
+import { generateAllocationSuggestion, getTopCandidates, simulateAllocation, batchSimulateAllocation } from '../services/allocationService';
 import { getActiveRulesForStore, getPublishedRules, getDraftRules, getRuleByCodeAndVersion } from '../models/ruleModel';
 import { getScriptById, getCharactersByScriptId, getRelationshipsByScriptId } from '../models/scriptModel';
 import { getStoreById } from '../models/storeModel';
@@ -46,6 +46,40 @@ const simulateSchema = z.object({
     code: z.string(),
     version: z.number().int().positive()
   })).optional()
+});
+
+const batchSimulateGroupSchema = z.object({
+  group_id: z.string().min(1),
+  group_name: z.string().min(1),
+  store_id: z.number().int().positive().optional(),
+  script_id: z.number().int().positive(),
+  players: z.array(playerSchema).min(1).max(20)
+});
+
+const batchSimulateSchema = z.object({
+  baseline_store_id: z.number().int().positive(),
+  compare_mode: z.enum(['draft', 'gray', 'specified']),
+  groups: z.array(batchSimulateGroupSchema).min(1).max(20),
+  specified_versions: z.array(z.object({
+    code: z.string(),
+    version: z.number().int().positive()
+  })).optional()
+}).refine(data => {
+  if (data.compare_mode === 'gray') {
+    return data.groups.every(g => g.store_id !== undefined);
+  }
+  return true;
+}, {
+  message: 'gray 模式下每个 group 必须有 store_id',
+  path: ['groups']
+}).refine(data => {
+  if (data.compare_mode === 'specified') {
+    return data.specified_versions !== undefined && data.specified_versions.length > 0;
+  }
+  return true;
+}, {
+  message: 'specified 模式下 specified_versions 不能为空',
+  path: ['specified_versions']
 });
 
 const feedbackSchema = z.object({
@@ -209,6 +243,34 @@ router.post('/simulate', validateBody(simulateSchema), handleAsync(async (req: R
       store: { id: store.id, name: store.name },
       simulation: result
     }
+  });
+}));
+
+router.post('/batch-simulate', validateBody(batchSimulateSchema), handleAsync(async (req: Request, res: Response) => {
+  const { baseline_store_id, compare_mode, groups, specified_versions } = req.body;
+
+  const baselineStore = getStoreById(baseline_store_id);
+  if (!baselineStore) {
+    res.status(404).json({ success: false, error: '基准门店不存在' });
+    return;
+  }
+
+  const result = batchSimulateAllocation({
+    baselineStoreId: Number(baseline_store_id),
+    compareMode: compare_mode,
+    groups: groups.map((g: { group_id: string; group_name: string; store_id?: number; script_id: number; players: any[] }) => ({
+      groupId: g.group_id,
+      groupName: g.group_name,
+      storeId: g.store_id ? Number(g.store_id) : undefined,
+      scriptId: Number(g.script_id),
+      players: g.players,
+    })),
+    specifiedRuleVersions: specified_versions,
+  });
+
+  res.json({
+    success: true,
+    data: result
   });
 }));
 

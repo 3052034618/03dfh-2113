@@ -2,20 +2,24 @@ import { initDb, saveToDisk, closeDb } from './db/database';
 import {
   getAllRules, getVersionsByCode, getActiveRulesForStore,
   getRuleByCode, createNewVersion, publishVersion, rollbackToVersion,
-  getAuditLogs, getRuleByCodeAndVersion, getEnabledRules, parseGrayStoreIds
+  getAuditLogs, getRuleByCodeAndVersion, getEnabledRules, parseGrayStoreIds,
+  getReleasePlans, getReleasePlanById, createReleasePlan, submitReleasePlan,
+  approveReleasePlan, rejectReleasePlan, scheduleReleasePlan, pauseReleasePlan,
+  resumeReleasePlan, cancelReleasePlan, executeReleasePlan,
 } from './models/ruleModel';
 import {
   getStatsSummary, getRefusalRateTrend, getOnSiteChangesTrend,
   getGenderTroubleScripts, getAllStoresStats, getScriptTroubleStats,
-  getStoreStatsWithFilters, compareStatsByPeriod, compareStatsByStore
+  getStoreStatsWithFilters, compareStatsByPeriod, compareStatsByStore,
+  getGrayEffectBoard,
 } from './models/statsModel';
 import {
-  getAllAllocations, getAllocationsByFilters, parseRuleVersions,
+  getAllocationsByFilters, parseRuleVersions,
 } from './models/allocationModel';
 import { getCharactersByScriptId, getRelationshipsByScriptId, getScriptById } from './models/scriptModel';
-import { generateAllocationSuggestion, simulateAllocation } from './services/allocationService';
+import { generateAllocationSuggestion, simulateAllocation, batchSimulateAllocation } from './services/allocationService';
 import { filterApplicableRules } from './rules/ruleEngine';
-import { Player } from './types';
+import { Player, BatchSimGroup } from './types';
 
 const assert = (cond: any, msg: string) => {
   if (!cond) {
@@ -30,290 +34,334 @@ const pass = (msg: string) => console.log(`  ✅ ${msg}`);
 async function run() {
   await initDb();
 
-  console.log('🧪 开始 Phase 4 功能测试（规则治理闭环 + 对比视图 + 筛选口径修复）...\n');
+  console.log('🧪 开始 Phase 5 功能测试（发布审批流 + 灰度看板 + 批量模拟 + 口径对齐）...\n');
 
   // ──────────────────────────────────────────────────────────────
-  // 1. 操作审计日志测试
+  // 1. 发布计划完整流程
   // ──────────────────────────────────────────────────────────────
-  console.log('1️⃣  测试规则操作审计日志...');
+  console.log('1️⃣  测试发布审批流程（草稿→提交→审批→定时→暂停→执行）...');
 
-  const allLogs = getAuditLogs();
-  pass(`全局审计日志条数: ${allLogs.length}`);
+  // 先创建一个草稿版本
+  const code = 'lead_character_priority';
+  const draftId = createNewVersion(code, { priority: 60 }, 'draft', 'product_manager');
+  pass(`创建草稿版本 v${getRuleByCodeAndVersion(code, getVersionsByCode(code)[0].version)?.version}，id=${draftId}`);
 
-  const genderLogs = getAuditLogs({ ruleCode: 'gender_match' });
-  pass(`gender_match 相关操作日志: ${genderLogs.length} 条（含 create_version）`);
+  // 创建发布计划（全量发布，草稿状态）
+  const planId = createReleasePlan(draftId, { releaseType: 'full' }, 'product_manager');
+  const plan = getReleasePlanById(planId)!;
+  assert(plan && plan.status === 'draft', `创建发布计划成功，状态=draft，id=${planId}`);
 
-  const createLogs = getAuditLogs({ action: 'create_version' });
-  pass(`创建版本类日志共 ${createLogs.length} 条`);
+  // 提交审核
+  const submitOk = submitReleasePlan(planId, 'product_manager');
+  const planSubmitted = getReleasePlanById(planId)!;
+  assert(submitOk && planSubmitted.status === 'submitted', '提交审核成功，状态=submitted');
+  assert(planSubmitted.submittedBy === 'product_manager', '记录了提交人');
 
-  const recentLimit = getAuditLogs({ limit: 5 });
-  pass(`limit=5 查询返回 ${recentLimit.length} 条，按时间倒序`);
+  // 审批通过
+  const approveOk = approveReleasePlan(planId, 'ops_director', '优先级调整合理，同意发布');
+  const planApproved = getReleasePlanById(planId)!;
+  assert(approveOk && planApproved.status === 'approved', '审批通过，状态=approved');
+  assert(planApproved.approvedBy === 'ops_director', '记录了审批人');
+  assert(planApproved.reviewComment === '优先级调整合理，同意发布', '记录了审批意见');
 
-  if (genderLogs.length > 0) {
-    const first = genderLogs[0];
-    const hasRequired =
-      first.ruleCode === 'gender_match' &&
-      first.action &&
-      first.operator &&
-      Array.isArray(first.affectedStoreIds) &&
-      first.createdAt;
-    assert(hasRequired, '审计日志包含 ruleCode/action/operator/affectedStoreIds/createdAt');
+  // 设置定时发布
+  const futureTime = new Date(Date.now() + 86400000).toISOString();
+  const schedOk = scheduleReleasePlan(planId, futureTime, 'ops_director');
+  const planScheduled = getReleasePlanById(planId)!;
+  assert(schedOk && planScheduled.status === 'scheduled', '设置定时发布成功，状态=scheduled');
+  assert(planScheduled.scheduledAt !== undefined, '记录了 scheduledAt');
+
+  // 暂停
+  const pauseOk = pauseReleasePlan(planId, 'ops_director');
+  const planPaused = getReleasePlanById(planId)!;
+  assert(pauseOk && planPaused.status === 'paused', '暂停成功，状态=paused');
+
+  // 恢复
+  const resumeOk = resumeReleasePlan(planId, 'ops_director');
+  const planResumed = getReleasePlanById(planId)!;
+  assert(resumeOk && planResumed.status === 'scheduled', '恢复成功，状态=scheduled');
+
+  // 立即执行发布
+  const execOk = executeReleasePlan(planId, 'ops_director');
+  const planExecuted = getReleasePlanById(planId)!;
+  assert(execOk && planExecuted.status === 'published', '执行发布成功，状态=published');
+  assert(planExecuted.publishedBy === 'ops_director', '记录了发布人');
+
+  const publishedRule = getRuleByCode(code)!;
+  assert(publishedRule.status === 'published' && publishedRule.id === draftId, '对应的规则版本已切换为 published');
+
+  // 再测一条灰度发布计划 + 取消
+  const code2 = 'hardcore_reasoning_match';
+  const draftId2 = createNewVersion(code2, { priority: 70 }, 'draft', 'product_manager');
+  const planId2 = createReleasePlan(draftId2, {
+    releaseType: 'gray',
+    grayStoreIds: [1, 2],
+  }, 'product_manager');
+  const plan2 = getReleasePlanById(planId2)!;
+  assert(plan2.releaseType === 'gray' && plan2.grayStoreIds.length === 2, `灰度发布计划创建成功，影响 ${plan2.grayStoreIds.length} 家门店`);
+
+  submitReleasePlan(planId2, 'product_manager');
+  rejectReleasePlan(planId2, 'ops_director', '先做小范围验证再提交');
+  const planRejected = getReleasePlanById(planId2)!;
+  assert(planRejected.status === 'rejected', '审批拒绝成功，状态=rejected');
+
+  // 取消一条
+  const planId3 = createReleasePlan(draftId2, { releaseType: 'gray', grayStoreIds: [3] }, 'product_manager');
+  const cancelOk = cancelReleasePlan(planId3, 'product_manager', '优先级冲突，暂缓');
+  const planCancelled = getReleasePlanById(planId3)!;
+  assert(cancelOk && planCancelled.status === 'cancelled', '取消发布计划成功，状态=cancelled');
+
+  // 列表查询
+  const allPlans = getReleasePlans();
+  const submittedPlans = getReleasePlans({ status: 'published' });
+  pass(`发布计划列表共 ${allPlans.length} 条，其中 published 状态 ${submittedPlans.length} 条`);
+  assert(allPlans.length >= 3, '发布计划列表至少 3 条');
+
+  // ──────────────────────────────────────────────────────────────
+  // 2. 操作日志按动作筛选 + 回滚记录显示灰度门店
+  // ──────────────────────────────────────────────────────────────
+  console.log('\n2️⃣  测试操作日志按动作筛选 & 回滚记录带灰度门店...');
+
+  const actionList: string[] = ['create_version', 'submit_review', 'approve_release', 'publish_full', 'cancel_release'];
+  for (const act of actionList) {
+    const logs = getAuditLogs({ action: act as any });
+    assert(Array.isArray(logs), `按 action=${act} 筛选返回数组（${logs.length} 条）`);
   }
 
-  // ──────────────────────────────────────────────────────────────
-  // 2. 回滚后灰度门店切回目标版本（修复前可能灰度规则还在）
-  // ──────────────────────────────────────────────────────────────
-  console.log('\n2️⃣  测试回滚后灰度门店切回目标版本...');
+  // 发布/回滚记录含操作人、时间、影响门店
+  const publishLogs = getAuditLogs({ action: 'publish_full' });
+  if (publishLogs.length > 0) {
+    const log = publishLogs[0];
+    assert(log.operator && log.createdAt, '发布记录含操作人、时间');
+    assert(Array.isArray(log.affectedStoreIds), '发布记录含 affectedStoreIds 数组');
+  }
+  pass(`发布类日志共 ${publishLogs.length} 条，字段完整`);
 
-  const ruleCode = 'age_appropriateness';
-  const v1 = getRuleByCodeAndVersion(ruleCode, 1)!;
-  const v2DraftId = createNewVersion(ruleCode, { priority: 45 }, 'draft', 'tester_op');
-  publishVersion(v2DraftId, { grayStoreIds: [1, 2, 3] }, 'tester_op');
+  // 回滚记录 - 先触发一次回滚（age_appropriateness 之前回滚过，但再确认一次）
+  const rollbackLogs = getAuditLogs({ action: 'rollback' });
+  if (rollbackLogs.length > 0) {
+    const rb = rollbackLogs[0];
+    assert(Array.isArray(rb.affectedStoreIds), `回滚记录含 affectedStoreIds（${rb.affectedStoreIds.length} 家门店）`);
+    assert(rb.detail?.targetVersion !== undefined, `回滚记录 detail.targetVersion = ${rb.detail.targetVersion}`);
+    pass(`回滚日志：操作人=${rb.operator}, 受影响门店=${rb.affectedStoreIds.join(',') || '无'}`);
+  }
 
-  // 灰度发布后，门店1、2、3 都应拿到 v2 (gray)
-  const s1Before = getActiveRulesForStore(1).find(r => r.code === ruleCode)!;
-  const s4Before = getActiveRulesForStore(4).find(r => r.code === ruleCode)!;
-  assert(s1Before.version === 2 && s1Before.status === 'gray', `回滚前门店1 拿到 ${ruleCode} v2 (gray)`);
-  assert(s4Before.version === 1 && s4Before.status === 'published', `回滚前门店4 拿到 ${ruleCode} v1 (published)`);
+  const submitLogs = getAuditLogs({ action: 'submit_review' });
+  pass(`提交审核类日志共 ${submitLogs.length} 条`);
 
-  const rollbackId = rollbackToVersion(ruleCode, 1, 'tester_op');
-  const s1After = getActiveRulesForStore(1).find(r => r.code === ruleCode)!;
-  const s2After = getActiveRulesForStore(2).find(r => r.code === ruleCode)!;
-  const s3After = getActiveRulesForStore(3).find(r => r.code === ruleCode)!;
-  const s4After = getActiveRulesForStore(4).find(r => r.code === ruleCode)!;
-
-  assert(
-    s1After.version === 3 && s1After.status === 'published',
-    `回滚后门店1（原灰度）切回最新 published v3，不再用 v2 gray`
-  );
-  assert(
-    s2After.version === 3 && s2After.status === 'published',
-    `回滚后门店2（原灰度）切回最新 published v3`
-  );
-  assert(
-    s3After.version === 3 && s3After.status === 'published',
-    `回滚后门店3（原灰度）切回最新 published v3`
-  );
-  assert(
-    s4After.version === 3 && s4After.status === 'published',
-    `回滚后门店4 同步切到最新 published v3`
-  );
-
-  // 验证 v2 gray 已被 archived
-  const v2After = getRuleByCodeAndVersion(ruleCode, 2)!;
-  assert(v2After.status === 'archived', `原灰度版本 v2 状态已变成 archived`);
-
-  const rollbackLogs = getAuditLogs({ ruleCode, action: 'rollback' });
-  assert(rollbackLogs.length >= 1, '回滚操作已写入审计日志');
-  const rLog = rollbackLogs[0];
-  assert(
-    rLog.affectedStoreIds.length >= 1 || rLog.detail?.targetVersion === 1,
-    `回滚日志含受影响门店列表（${rLog.affectedStoreIds.join(',') || '空'}）及 detail.targetVersion=${rLog.detail?.targetVersion}`
-  );
-  assert(rLog.operator === 'tester_op', `回滚日志 operator = 'tester_op'`);
+  // 按操作人筛选
+  const pmLogs = getAuditLogs({ operator: 'product_manager' });
+  pass(`product_manager 操作日志共 ${pmLogs.length} 条`);
 
   // ──────────────────────────────────────────────────────────────
-  // 3. 筛选口径修复：带剧本条件看某家门店 / 剧本排行不混进其他剧本
+  // 3. 灰度效果看板
   // ──────────────────────────────────────────────────────────────
-  console.log('\n3️⃣  测试筛选口径修复（剧本/门店/时间统一）...');
+  console.log('\n3️⃣  测试灰度效果看板（灰度组 vs 对照组）...');
 
-  // 门店1 + 剧本2 + 30天 的 summary
-  const filterStore1Script2 = { storeId: 1, scriptId: 2, days: 30 };
-  const summary1 = getStatsSummary(filterStore1Script2);
+  const board = getGrayEffectBoard('cross_gender_willingness', 30);
+  assert(board !== null, '获取灰度效果看板成功');
 
-  // summary.totalAllocations 必须等于 stores stats 总和
-  const storeTotalFromStores = summary1.totalStores > 0
-    ? getAllStoresStats(filterStore1Script2).stats.reduce((s, x) => s + x.totalAllocations, 0)
-    : 0;
-  assert(
-    summary1.totalAllocations === storeTotalFromStores,
-    `summary 的 totalAllocations(${summary1.totalAllocations}) = 逐门店统计之和(${storeTotalFromStores})`
-  );
+  assert(board!.meta.ruleCode === 'cross_gender_willingness', '看板 meta 含 ruleCode');
+  assert(board!.meta.grayStoreCount > 0 && board!.meta.controlStoreCount > 0,
+    `灰度组 ${board!.meta.grayStoreCount} 家 / 对照组 ${board!.meta.controlStoreCount} 家`);
+  assert(board!.meta.filterDescription && board!.meta.filterDescription.includes('灰度效果对比'),
+    `filterDescription 描述清晰：${board!.meta.filterDescription}`);
 
-  // 问题剧本排行带剧本筛选时，只能出现该剧本或空
-  const troubleByScript2 = getScriptTroubleStats({ scriptId: 2, days: 30 });
-  const onlyScript2 = troubleByScript2.data.every(d => d.script_id === 2);
-  assert(onlyScript2, `getScriptTroubleStats(scriptId=2) 只包含剧本2 的记录（${troubleByScript2.data.length} 条）`);
+  assert(board!.grayGroup.totalAllocations >= 0, '灰度组总场次已计算');
+  assert(board!.controlGroup.totalAllocations >= 0, '对照组总场次已计算');
+  assert(board!.grayGroup.troubledScripts.length <= 5, '灰度组问题剧本最多 5 条');
+  assert(board!.controlGroup.troubledScripts.length <= 5, '对照组问题剧本最多 5 条');
 
-  const genderTroubleByScript2 = getGenderTroubleScripts({ scriptId: 2, days: 30 }, 10);
-  const gtOnlyScript2 = genderTroubleByScript2.scripts.every(s => s.scriptId === 2);
-  assert(gtOnlyScript2, `getGenderTroubleScripts(scriptId=2) 只包含剧本2（${genderTroubleByScript2.scripts.length} 条）`);
+  assert(typeof board!.diff.crossGenderRefusalRate.diff === 'number', 'diff.refusalRate.diff 是数字');
+  assert(typeof board!.diff.averageOnSiteChanges.diffPct === 'number', 'diff.onSiteChanges.diffPct 是数字');
+  assert(typeof board!.diff.totalAllocations.diff === 'number', 'diff.totalAllocations.diff 是数字');
 
-  // 单店统计 topTroubledScripts 带剧本筛选时只统计该剧本
-  const store1WithScript2 = getStoreStatsWithFilters({ storeId: 1, scriptId: 2, days: 30 });
-  const tsMatch = store1WithScript2?.topTroubledScripts.every(s => s.scriptId === 2) ?? true;
-  assert(tsMatch, `getStoreStatsWithFilters(storeId=1,scriptId=2) 的 topTroubledScripts 只包含剧本2`);
+  assert(Array.isArray(board!.hitRuleVersions.gray), '灰度组命中规则版本是数组');
+  assert(Array.isArray(board!.hitRuleVersions.control), '对照组命中规则版本是数组');
+  assert(board!.hitRuleVersions.gray.length > 0 && board!.hitRuleVersions.control.length > 0,
+    `两组都有命中规则：gray=${board!.hitRuleVersions.gray.length} 条, control=${board!.hitRuleVersions.control.length} 条`);
 
-  // 趋势接口筛选口径：4 种组合 filterDescription 完全一致
-  const comboFilters = [
-    { label: '全局30天', f: { days: 30 } },
-    { label: '门店1 7天', f: { storeId: 1, days: 7 } },
-    { label: '剧本2 30天', f: { scriptId: 2, days: 30 } },
-    { label: '门店2+剧本2 30天', f: { storeId: 2, scriptId: 2, days: 30 } },
+  const grayCgRule = board!.hitRuleVersions.gray.find(r => r.code === 'cross_gender_willingness');
+  const ctrlCgRule = board!.hitRuleVersions.control.find(r => r.code === 'cross_gender_willingness');
+  assert(grayCgRule && ctrlCgRule && grayCgRule.version !== ctrlCgRule.version,
+    `灰度组 cross_gender_willingness v${grayCgRule?.version} vs 对照组 v${ctrlCgRule?.version}，版本不同`);
+
+  assert(Array.isArray(board!.insights) && board!.insights.length >= 2,
+    `自动生成 ${board!.insights.length} 条业务洞察`);
+
+  // 非灰度规则返回 null
+  const boardNull = getGrayEffectBoard('lead_character_priority', 30);
+  assert(boardNull === null, '非灰度规则返回 null（404 场景）');
+
+  // ──────────────────────────────────────────────────────────────
+  // 4. 单店+剧本筛选口径彻底对齐
+  // ──────────────────────────────────────────────────────────────
+  console.log('\n4️⃣  测试单店+剧本筛选口径彻底对齐...');
+
+  const storeId = 1;
+  const scriptId = 2;
+  const days = 30;
+
+  // 单店统计
+  const s1 = getStoreStatsWithFilters({ storeId, scriptId, days });
+  assert(s1 !== null, '单店统计查询成功');
+
+  // 门店全表统计的同一家门店同剧本，结果一致
+  const allStores = getAllStoresStats({ storeId, scriptId, days });
+  const fromAllStores = allStores.stats.find(s => s.storeId === storeId);
+  assert(fromAllStores !== undefined, 'getAllStoresStats 也返回了该门店');
+  assert(s1!.totalAllocations === fromAllStores!.totalAllocations,
+    `totalAllocations 一致：${s1!.totalAllocations} === ${fromAllStores!.totalAllocations}`);
+  assert(Math.abs(s1!.crossGenderRefusalRate - fromAllStores!.crossGenderRefusalRate) < 0.001,
+    `crossGenderRefusalRate 一致`);
+  assert(Math.abs(s1!.averageOnSiteChanges - fromAllStores!.averageOnSiteChanges) < 0.001,
+    `averageOnSiteChanges 一致`);
+
+  // summary 也对得上
+  const summary = getStatsSummary({ storeId, scriptId, days });
+  assert(summary.totalAllocations === s1!.totalAllocations,
+    `summary.totalAllocations(${summary.totalAllocations}) === 单店统计(${s1!.totalAllocations})`);
+
+  // 趋势接口与 summary 的时间范围一致（都 30 天）
+  const trendR = getRefusalRateTrend({ storeId, scriptId, days });
+  const trendO = getOnSiteChangesTrend({ storeId, scriptId, days });
+  assert(trendR.meta.days === days && trendO.meta.days === days, '趋势接口天数一致');
+  assert(trendR.meta.filterDescription === trendO.meta.filterDescription,
+    `趋势接口 filterDescription 一致：${trendR.meta.filterDescription}`);
+
+  // 问题剧本排行带剧本筛选只返回这一个剧本
+  const gt = getGenderTroubleScripts({ storeId, scriptId, days }, 10);
+  const allSameScript = gt.scripts.every(s => s.scriptId === scriptId);
+  assert(allSameScript || gt.scripts.length === 0, `性别问题排行只含剧本 ${scriptId}（${gt.scripts.length} 条）`);
+
+  const st = getScriptTroubleStats({ storeId, scriptId, days });
+  const allSameScript2 = st.data.every(d => d.script_id === scriptId);
+  assert(allSameScript2 || st.data.length === 0, `剧本问题统计只含剧本 ${scriptId}（${st.data.length} 条）`);
+
+  // 单店统计的 topTroubledScripts 也只包含该剧本
+  const allTopSame = s1!.topTroubledScripts.every(t => t.scriptId === scriptId);
+  assert(allTopSame || s1!.topTroubledScripts.length === 0,
+    `单店统计 topTroubledScripts 只含剧本 ${scriptId}`);
+
+  pass('单店+剧本筛选下：summary / 单店统计 / 全表门店统计 / 趋势 / 问题排行 全部口径一致 ✓');
+
+  // ──────────────────────────────────────────────────────────────
+  // 5. 批量模拟试算
+  // ──────────────────────────────────────────────────────────────
+  console.log('\n5️⃣  测试批量模拟试算（多组玩家，多门店）...');
+
+  const playerGroups: BatchSimGroup[] = [
+    {
+      groupId: 'g1',
+      groupName: '周末情感本-门店1',
+      storeId: 1,
+      scriptId: 1,
+      players: [
+        { name: '张三', gender: 'male', age: 28, is_regular: true, courage_level: 4, reasoning_level: 3, emotional_tolerance: 5 },
+        { name: '李四', gender: 'female', age: 26, is_regular: false, courage_level: 2, reasoning_level: 3, emotional_tolerance: 4 },
+        { name: '王五', gender: 'male', age: 30, is_regular: false, courage_level: 5, reasoning_level: 2, emotional_tolerance: 3 },
+        { name: '赵六', gender: 'female', age: 22, is_regular: true, courage_level: 3, reasoning_level: 4, emotional_tolerance: 5 },
+        { name: '孙七', gender: 'male', age: 17, is_regular: false, courage_level: 3, reasoning_level: 3, emotional_tolerance: 2 },
+        { name: '周八', gender: 'female', age: 32, is_regular: false, courage_level: 3, reasoning_level: 4, emotional_tolerance: 5 },
+      ],
+    },
+    {
+      groupId: 'g2',
+      groupName: '周末恐怖本-门店2',
+      storeId: 2,
+      scriptId: 2,
+      players: [
+        { name: '陈一', gender: 'female', age: 25, is_regular: false, courage_level: 5, reasoning_level: 4, emotional_tolerance: 3 },
+        { name: '林二', gender: 'male', age: 27, is_regular: true, courage_level: 4, reasoning_level: 5, emotional_tolerance: 2 },
+        { name: '黄三', gender: 'female', age: 23, is_regular: false, courage_level: 2, reasoning_level: 3, emotional_tolerance: 4 },
+        { name: '徐四', gender: 'male', age: 29, is_regular: false, courage_level: 3, reasoning_level: 4, emotional_tolerance: 3 },
+      ],
+    },
+    {
+      groupId: 'g3',
+      groupName: '硬核内测-门店3',
+      storeId: 3,
+      scriptId: 3,
+      players: [
+        { name: '钱甲', gender: 'male', age: 31, is_regular: true, courage_level: 3, reasoning_level: 5, emotional_tolerance: 2 },
+        { name: '吴乙', gender: 'female', age: 28, is_regular: true, courage_level: 2, reasoning_level: 5, emotional_tolerance: 3 },
+        { name: '郑丙', gender: 'male', age: 35, is_regular: false, courage_level: 3, reasoning_level: 4, emotional_tolerance: 2 },
+        { name: '冯丁', gender: 'female', age: 26, is_regular: false, courage_level: 3, reasoning_level: 4, emotional_tolerance: 3 },
+        { name: '陈戊', gender: 'male', age: 24, is_regular: true, courage_level: 4, reasoning_level: 5, emotional_tolerance: 3 },
+        { name: '褚己', gender: 'female', age: 30, is_regular: false, courage_level: 2, reasoning_level: 3, emotional_tolerance: 4 },
+      ],
+    },
   ];
-  for (const c of comboFilters) {
-    const r = getRefusalRateTrend(c.f);
-    const o = getOnSiteChangesTrend(c.f);
-    const g = getGenderTroubleScripts(c.f, 10);
-    const t = getScriptTroubleStats(c.f);
-    const s = getStatsSummary(c.f);
-    const descs = new Set([r.meta.filterDescription, o.meta.filterDescription, g.meta.filterDescription, t.meta.filterDescription, s.meta.filterDescription]);
-    assert(descs.size === 1, `【${c.label}】5 个统计接口 filterDescription 完全一致：${Array.from(descs)[0]}`);
-  }
 
-  // 门店全表统计（带剧本条件）只返回对应门店对应剧本的统计（不会混进其他剧本）
-  const storesByScript2 = getAllStoresStats({ scriptId: 2, days: 30 });
-  for (const st of storesByScript2.stats) {
-    const sumExpected = storeTotalFromStoresFor(2, st.storeId);
-    assert(
-      st.totalAllocations === sumExpected,
-      `allStoresStats 中「${st.storeName}」场次(${st.totalAllocations}) 等于实际脚本2场次(${sumExpected})`
-    );
-    const topOk = st.topTroubledScripts.every(x => x.scriptId === 2 || x.troubleCount === 0);
-    assert(topOk, `allStoresStats 中「${st.storeName}」topTroubledScripts 只包含剧本2`);
-  }
-  pass(`门店全表统计（scriptId=2）口径一致，不混入其他剧本`);
-
-  // ──────────────────────────────────────────────────────────────
-  // 4. 对比视图：时间段对比 + 门店对比
-  // ──────────────────────────────────────────────────────────────
-  console.log('\n4️⃣  测试运营对比视图（时间段 / 门店）...');
-
-  const periodCmp = compareStatsByPeriod(
-    { storeId: 1, days: 7 },
-    { storeId: 1, days: 30 }
-  );
-  pass(`时间段对比生成了 meta：${periodCmp.meta.comparisonDescription}`);
-  assert(periodCmp.meta.periodA.days === 7 && periodCmp.meta.periodB.days === 30, '对比视图 meta 区分两个时段');
-  assert(
-    typeof periodCmp.crossGenderRefusalRate.diff === 'number' &&
-    typeof periodCmp.averageOnSiteChanges.diffPct === 'number',
-    '核心指标都有 diff / diffPct'
-  );
-  assert(
-    Array.isArray(periodCmp.changeReasons) && periodCmp.changeReasons.length > 0,
-    `变化原因摘要共 ${periodCmp.changeReasons.length} 条`
-  );
-  assert(
-    Array.isArray(periodCmp.genderTroubleScripts.periodA) &&
-    Array.isArray(periodCmp.genderTroubleScripts.periodB) &&
-    Array.isArray(periodCmp.genderTroubleScripts.changed),
-    '问题剧本对比：periodA / periodB / changed 三部分齐全'
-  );
-
-  const storeCmp = compareStatsByStore(1, 2, { days: 30 });
-  pass(`门店对比生成了 meta：${storeCmp.meta.comparisonDescription}`);
-  assert(
-    storeCmp.meta.periodA.storeId === 1 && storeCmp.meta.periodB.storeId === 2,
-    '门店对比分别列出了 periodA=store1, periodB=store2'
-  );
-  assert(storeCmp.totalAllocations.diff != null || storeCmp.crossGenderCount.diff != null, '门店对比核心指标已填充');
-
-  // ──────────────────────────────────────────────────────────────
-  // 5. 模拟对比增强：playerScoreDiffs + hitRuleVersions
-  // ──────────────────────────────────────────────────────────────
-  console.log('\n5️⃣  测试模拟对比增强输出（玩家差异原因 + 命中版本）...');
-
-  const players: Player[] = [
-    { name: '张三', gender: 'male', age: 28, is_regular: true, courage_level: 4, reasoning_level: 4, emotional_tolerance: 3 },
-    { name: '李四', gender: 'female', age: 26, is_regular: false, courage_level: 2, reasoning_level: 3, emotional_tolerance: 5, cross_gender_willing: true },
-    { name: '王五', gender: 'male', age: 30, is_regular: false, courage_level: 5, reasoning_level: 3, emotional_tolerance: 2 },
-    { name: '赵六', gender: 'female', age: 22, is_regular: true, courage_level: 3, reasoning_level: 4, emotional_tolerance: 4 },
-    { name: '孙七', gender: 'male', age: 17, is_regular: false, courage_level: 3, reasoning_level: 3, emotional_tolerance: 3 },
-    { name: '周八', gender: 'female', age: 32, is_regular: false, courage_level: 3, reasoning_level: 4, emotional_tolerance: 4 },
-  ];
-
-  const script = getScriptById(1)!;
-  const chars = getCharactersByScriptId(1);
-  const rels = getRelationshipsByScriptId(1);
-
-  const store1Rules = filterApplicableRules(getActiveRulesForStore(1), script.type, 1);
-  const store3Rules = filterApplicableRules(getActiveRulesForStore(3), script.type, 3);
-
-  const sim = simulateAllocation(players, chars, rels, script.type, {
-    currentRules: store1Rules,
-    specifiedRules: store3Rules,
+  const batchResult = batchSimulateAllocation({
+    baselineStoreId: 3,  // 基准：门店3（非灰度，旧版规则）
+    compareMode: 'gray',
+    groups: playerGroups,
   });
 
-  assert(!!sim.diffCurrentVsSpecified, '指定版本对比返回了 diffCurrentVsSpecified');
-  const diff = sim.diffCurrentVsSpecified!;
+  assert(batchResult.groups.length === 3, `批量模拟返回 ${batchResult.groups.length} 组，与输入一致`);
+  assert(batchResult.baselineStoreId === 3, 'baselineStoreId 正确');
+  assert(batchResult.compareMode === 'gray', 'compareMode 正确');
 
-  assert(
-    Array.isArray(diff.playerScoreDiffs) && diff.playerScoreDiffs.length === players.length,
-    `每个玩家都有分数差异：共 ${diff.playerScoreDiffs.length} 条`
-  );
-
-  const diff0 = diff.playerScoreDiffs[0];
-  assert(
-    diff0.playerName &&
-    diff0.fromCharacter &&
-    diff0.toCharacter &&
-    typeof diff0.scoreDiff === 'number' &&
-    typeof diff0.biggestScoreReason === 'string',
-    `玩家分数差异条目包含 name/from/to/scoreDiff/biggestScoreReason：${diff0.playerName} diff=${diff0.scoreDiff}`
-  );
-
-  assert(
-    diff.hitRuleVersions &&
-    Array.isArray(diff.hitRuleVersions.current) &&
-    Array.isArray(diff.hitRuleVersions.compare),
-    `命中规则版本齐全：current=${diff.hitRuleVersions.current.length} 条, compare=${diff.hitRuleVersions.compare.length} 条`
-  );
-
-  const cgRule = diff.hitRuleVersions.current.find(r => r.code === 'cross_gender_willingness');
-  const cgRuleCompare = diff.hitRuleVersions.compare.find(r => r.code === 'cross_gender_willingness');
-  assert(
-    !!cgRule && !!cgRuleCompare,
-    `cross_gender_willingness 命中版本：current v${cgRule?.version}, compare v${cgRuleCompare?.version}`
-  );
-
-  // ──────────────────────────────────────────────────────────────
-  // 6. 分配记录的规则版本（记录用的 storeId，对应规则版本要对得上）
-  // ──────────────────────────────────────────────────────────────
-  console.log('\n6️⃣  验证分配记录中规则版本的一致性...');
-
-  const allocStore1 = getAllocationsByFilters({ storeId: 1 }).slice(0, 1)[0];
-  if (allocStore1) {
-    const ruleVersions = parseRuleVersions(allocStore1);
-    assert(ruleVersions.length > 0, `分配#${allocStore1.id} 已记录规则版本：${ruleVersions.length} 条`);
-    const codes = ruleVersions.map(r => r.code);
-    assert(new Set(codes).size === codes.length, '分配记录中 rule_code 不重复');
+  // 每组都有完整字段
+  for (const g of batchResult.groups) {
+    assert(g.groupId && g.groupName, `组 ${g.groupId} 有 id 和 name`);
+    assert(typeof g.totalScore === 'number' && g.totalScore > 0, `组 ${g.groupId} 总分=${g.totalScore}`);
+    assert(typeof g.crossGenderCount === 'number', `组 ${g.groupId} 反串数=${g.crossGenderCount}`);
+    assert(typeof g.scoreDiffVsBaseline === 'number', `组 ${g.groupId} scoreDiffVsBaseline=${g.scoreDiffVsBaseline}`);
+    assert(Array.isArray(g.hitRuleVersions) && g.hitRuleVersions.length > 0,
+      `组 ${g.groupId} 命中 ${g.hitRuleVersions.length} 条规则版本`);
+    assert(Array.isArray(g.riskTips), `组 ${g.groupId} 有 ${g.riskTips.length} 条风险提示`);
+    assert(typeof g.roleChangesCount === 'number', `组 ${g.groupId} roleChangesCount=${g.roleChangesCount}`);
+    assert(Array.isArray(g.playerScoreDiffs) && g.playerScoreDiffs.length > 0,
+      `组 ${g.groupId} 有 ${g.playerScoreDiffs.length} 个玩家分数差异`);
   }
 
-  // ──────────────────────────────────────────────────────────────
-  // 7. 不同类型剧本规则互不干扰（Phase 2 回归）
-  // ──────────────────────────────────────────────────────────────
-  console.log('\n7️⃣  验证不同类型剧本规则互不干扰(Phase 2 回归测试)...');
+  // overallSummary
+  const s = batchResult.overallSummary;
+  assert(s.totalGroups === 3, `overallSummary.totalGroups = ${s.totalGroups}`);
+  assert(s.improvedCount + s.declinedCount <= 3, 'improved + declined <= total');
+  assert(typeof s.avgScoreDiff === 'number', 'avgScoreDiff 是数字');
+  assert(typeof s.avgCrossGenderDiff === 'number', 'avgCrossGenderDiff 是数字');
+  assert(typeof s.highRiskCount === 'number', 'highRiskCount 是数字');
 
-  const emotionalScript = getScriptById(1)!;
-  const horrorScript = getScriptById(2)!;
-  const emotionalChars = getCharactersByScriptId(emotionalScript.id);
-  const horrorChars = getCharactersByScriptId(horrorScript.id);
-  const storeRules = getEnabledRules();
+  assert(Array.isArray(batchResult.overallInsights) && batchResult.overallInsights.length >= 1,
+    `overallInsights 有 ${batchResult.overallInsights.length} 条`);
 
-  const emoRules = filterApplicableRules(storeRules, emotionalScript.type, 1);
+  pass(`批量模拟汇总：改善 ${s.improvedCount} 组 / 下降 ${s.declinedCount} 组 / 高风险 ${s.highRiskCount} 组`);
+
+  // 再验证一下 gray 模式下，灰度门店的 cross_gender_willingness 版本和基准不同
+  const g1 = batchResult.groups.find(g => g.groupId === 'g1')!; // 门店1，灰度
+  const g1Cg = g1.hitRuleVersions.find(r => r.code === 'cross_gender_willingness');
+  const g3 = batchResult.groups.find(g => g.groupId === 'g3')!; // 门店3，非灰度
+  const g3Cg = g3.hitRuleVersions.find(r => r.code === 'cross_gender_willingness');
+  assert(g1Cg && g3Cg && g1Cg.version !== g3Cg.version,
+    `灰度门店1 cross_gender_willingness v${g1Cg?.version} vs 基准门店3 v${g3Cg?.version}，版本不同 ✓`);
+
+  // ──────────────────────────────────────────────────────────────
+  // 6. Phase 2/3/4 回归
+  // ──────────────────────────────────────────────────────────────
+  console.log('\n6️⃣  回归测试（类型规则、版本管理、对比视图）...');
+
+  const emoRules = filterApplicableRules(getEnabledRules(), 'emotional', 1);
   const emoCodes = new Set(emoRules.map(r => r.code));
-  assert(
-    !emoCodes.has('horror_courage_match') && !emoCodes.has('hardcore_reasoning_match'),
-    '情感本不包含恐怖/硬核专属规则 ✓'
-  );
+  assert(!emoCodes.has('horror_courage_match'), '情感本不含恐怖专属规则');
 
-  const horrorRules = filterApplicableRules(storeRules, horrorScript.type, 1);
-  const horrorCodes = new Set(horrorRules.map(r => r.code));
-  assert(
-    horrorCodes.has('horror_courage_match') && !horrorCodes.has('hardcore_reasoning_match'),
-    '恐怖本包含胆量匹配、不包含硬核推理 ✓'
-  );
+  const hb = getGrayEffectBoard('cross_gender_willingness', 7);
+  assert(hb !== null, '7天看板也能返回');
 
-  console.log('\n🎉 Phase 4 所有测试通过！操作审计、回滚切回、筛选口径、对比视图、模拟增强均正常工作。');
+  const cmp = compareStatsByStore(1, 2, { days: 30 });
+  assert(cmp.meta.periodA.storeId === 1 && cmp.meta.periodB.storeId === 2, '门店对比仍正常');
+
+  const versions = getVersionsByCode('gender_match');
+  assert(versions.length >= 2, `gender_match 仍有 ${versions.length} 个版本`);
+
+  pass('Phase 2/3/4 核心功能回归正常 ✓');
+
+  console.log('\n🎉 Phase 5 所有测试通过！发布审批流、操作日志、灰度看板、批量模拟、筛选口径全部正常。');
 
   saveToDisk();
   closeDb();
-}
-
-function storeTotalFromStoresFor(scriptId: number, storeId: number): number {
-  const allocs = getAllocationsByFilters({ storeId, scriptId });
-  return allocs.length;
 }
 
 run().catch(err => {

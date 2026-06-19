@@ -10,6 +10,7 @@ import {
   getStatsSummary,
   compareStatsByPeriod,
   compareStatsByStore,
+  getGrayEffectBoard,
   StatsFilters
 } from '../models/statsModel';
 
@@ -214,6 +215,24 @@ router.get('/compare/store', handleAsync(async (req: Request, res: Response) => 
 
   const result = compareStatsByStore(Number(storeIdA), Number(storeIdB), commonFilters);
   res.json({ success: true, data: result });
+}));
+
+router.get('/gray-effect-board', handleAsync(async (req: Request, res: Response) => {
+  const ruleCode = req.query.rule_code;
+  if (!ruleCode) {
+    res.status(400).json({ success: false, error: '缺少参数 rule_code' });
+    return;
+  }
+
+  const days = req.query.days ? Number(req.query.days) : undefined;
+  const board = getGrayEffectBoard(ruleCode as string, days ? days : undefined);
+
+  if (!board) {
+    res.status(404).json({ success: false, error: '未找到该规则的灰度版本' });
+    return;
+  }
+
+  res.json({ success: true, data: board });
 }));
 
 export default router;

@@ -15,7 +15,19 @@ import {
   rollbackToVersion,
   getActiveRulesForStore,
   parseGrayStoreIds,
-  getAuditLogs
+  getAuditLogs,
+  getReleasePlans,
+  getReleasePlanById,
+  getReleasePlansByCode,
+  createReleasePlan,
+  submitReleasePlan,
+  approveReleasePlan,
+  rejectReleasePlan,
+  scheduleReleasePlan,
+  pauseReleasePlan,
+  resumeReleasePlan,
+  cancelReleasePlan,
+  executeReleasePlan
 } from '../models/ruleModel';
 import { getAvailableRuleCodes, getDefaultApplicableTypes } from '../rules/ruleEngine';
 import { parseRuleScope } from '../models/ruleModel';
@@ -325,6 +337,249 @@ router.delete('/:id', handleAsync(async (req: Request, res: Response) => {
   }
 
   res.json({ success: true, message: '规则已删除' });
+}));
+
+router.get('/release-plans', handleAsync(async (req: Request, res: Response) => {
+  const ruleCode = req.query.rule_code as string | undefined;
+  const status = req.query.status as string | undefined;
+  const limitParam = req.query.limit as string | undefined;
+  const limit = limitParam ? parseInt(limitParam) : undefined;
+
+  const plans = getReleasePlans({ ruleCode, status: status as any, limit });
+  res.json({ success: true, data: plans });
+}));
+
+router.get('/release-plans/:id', handleAsync(async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: '无效的发布计划ID' });
+    return;
+  }
+
+  const plan = getReleasePlanById(id);
+  if (!plan) {
+    res.status(404).json({ success: false, error: '发布计划不存在' });
+    return;
+  }
+
+  res.json({ success: true, data: plan });
+}));
+
+router.get('/:code/release-plans', handleAsync(async (req: Request, res: Response) => {
+  const code = req.params.code;
+  const plans = getReleasePlansByCode(code);
+  res.json({ success: true, data: plans });
+}));
+
+router.post('/release-plans', handleAsync(async (req: Request, res: Response) => {
+  const { rule_id, release_type, gray_store_ids, scheduled_at } = req.body;
+
+  if (!rule_id || !release_type) {
+    res.status(400).json({ success: false, error: 'rule_id 和 release_type 必填' });
+    return;
+  }
+
+  const ruleId = Number(rule_id);
+  const releaseType = release_type as 'full' | 'gray';
+  const grayStoreIds = gray_store_ids as number[] | undefined;
+  const scheduledAt = scheduled_at as string | undefined;
+
+  try {
+    const operator = getOperator(req);
+    const planId = createReleasePlan(ruleId, { releaseType, grayStoreIds, scheduledAt }, operator);
+    res.status(201).json({ success: true, data: { id: planId } });
+  } catch (err: any) {
+    if (err.message?.includes('not found')) {
+      res.status(404).json({ success: false, error: err.message });
+    } else {
+      res.status(400).json({ success: false, error: err.message });
+    }
+  }
+}));
+
+router.post('/release-plans/:id/submit', handleAsync(async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: '无效的发布计划ID' });
+    return;
+  }
+
+  const plan = getReleasePlanById(id);
+  if (!plan) {
+    res.status(404).json({ success: false, error: '发布计划不存在' });
+    return;
+  }
+
+  try {
+    const operator = getOperator(req);
+    submitReleasePlan(id, operator);
+    res.json({ success: true, message: '已提交审核' });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+}));
+
+router.post('/release-plans/:id/approve', handleAsync(async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: '无效的发布计划ID' });
+    return;
+  }
+
+  const plan = getReleasePlanById(id);
+  if (!plan) {
+    res.status(404).json({ success: false, error: '发布计划不存在' });
+    return;
+  }
+
+  try {
+    const { review_comment } = req.body;
+    const operator = getOperator(req);
+    approveReleasePlan(id, operator, review_comment);
+    res.json({ success: true, message: '审批通过' });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+}));
+
+router.post('/release-plans/:id/reject', handleAsync(async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: '无效的发布计划ID' });
+    return;
+  }
+
+  const plan = getReleasePlanById(id);
+  if (!plan) {
+    res.status(404).json({ success: false, error: '发布计划不存在' });
+    return;
+  }
+
+  try {
+    const { review_comment } = req.body;
+    const operator = getOperator(req);
+    rejectReleasePlan(id, operator, review_comment);
+    res.json({ success: true, message: '已拒绝' });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+}));
+
+router.post('/release-plans/:id/schedule', handleAsync(async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: '无效的发布计划ID' });
+    return;
+  }
+
+  const plan = getReleasePlanById(id);
+  if (!plan) {
+    res.status(404).json({ success: false, error: '发布计划不存在' });
+    return;
+  }
+
+  const { scheduled_at } = req.body;
+  if (!scheduled_at) {
+    res.status(400).json({ success: false, error: 'scheduled_at 必填' });
+    return;
+  }
+
+  try {
+    const operator = getOperator(req);
+    scheduleReleasePlan(id, scheduled_at, operator);
+    res.json({ success: true, message: '已设置定时发布' });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+}));
+
+router.post('/release-plans/:id/pause', handleAsync(async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: '无效的发布计划ID' });
+    return;
+  }
+
+  const plan = getReleasePlanById(id);
+  if (!plan) {
+    res.status(404).json({ success: false, error: '发布计划不存在' });
+    return;
+  }
+
+  try {
+    const operator = getOperator(req);
+    pauseReleasePlan(id, operator);
+    res.json({ success: true, message: '已暂停' });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+}));
+
+router.post('/release-plans/:id/resume', handleAsync(async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: '无效的发布计划ID' });
+    return;
+  }
+
+  const plan = getReleasePlanById(id);
+  if (!plan) {
+    res.status(404).json({ success: false, error: '发布计划不存在' });
+    return;
+  }
+
+  try {
+    const operator = getOperator(req);
+    resumeReleasePlan(id, operator);
+    res.json({ success: true, message: '已恢复定时发布' });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+}));
+
+router.post('/release-plans/:id/cancel', handleAsync(async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: '无效的发布计划ID' });
+    return;
+  }
+
+  const plan = getReleasePlanById(id);
+  if (!plan) {
+    res.status(404).json({ success: false, error: '发布计划不存在' });
+    return;
+  }
+
+  try {
+    const { cancel_reason } = req.body;
+    const operator = getOperator(req);
+    cancelReleasePlan(id, operator, cancel_reason);
+    res.json({ success: true, message: '已取消' });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+}));
+
+router.post('/release-plans/:id/execute', handleAsync(async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: '无效的发布计划ID' });
+    return;
+  }
+
+  const plan = getReleasePlanById(id);
+  if (!plan) {
+    res.status(404).json({ success: false, error: '发布计划不存在' });
+    return;
+  }
+
+  try {
+    const operator = getOperator(req);
+    executeReleasePlan(id, operator);
+    res.json({ success: true, message: '发布成功' });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
 }));
 
 export default router;
