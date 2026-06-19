@@ -236,3 +236,90 @@ export interface GenderTroubleScript {
   onSiteChanges: number;
   genderTroubleScore: number;
 }
+
+export type RuleAuditAction = 'create_version' | 'publish_gray' | 'publish_full' | 'rollback' | 'archive' | 'update';
+
+export interface RuleAuditLog {
+  id: number;
+  ruleCode: string;
+  ruleId?: number;
+  ruleVersion?: number;
+  action: RuleAuditAction;
+  operator: string;
+  oldStatus?: RuleStatus;
+  newStatus?: RuleStatus;
+  affectedStoreIds: number[];
+  detail: Record<string, any>;
+  createdAt: string;
+}
+
+export interface PlayerScoreDiff {
+  playerName: string;
+  fromCharacter: string;
+  toCharacter: string;
+  scoreDiff: number;
+  biggestScoreReason: string;
+}
+
+export interface SimulationDiff {
+  roleChanges: {
+    playerName: string;
+    fromCharacter: string;
+    toCharacter: string;
+  }[];
+  crossGenderCountDiff: number;
+  totalScoreDiff: number;
+  ruleVersionDiff: {
+    added: { code: string; version: number }[];
+    removed: { code: string; version: number }[];
+    changed: { code: string; fromVersion: number; toVersion: number }[];
+  };
+  playerScoreDiffs: PlayerScoreDiff[];
+  hitRuleVersions: {
+    current: { code: string; version: number; name: string }[];
+    compare: { code: string; version: number; name: string }[];
+  };
+}
+
+export interface SimulationResult {
+  current: AllocationSuggestion;
+  draft?: AllocationSuggestion;
+  specified?: AllocationSuggestion;
+  diffCurrentVsDraft?: SimulationDiff;
+  diffCurrentVsSpecified?: SimulationDiff;
+}
+
+export interface MetricChange {
+  from: number;
+  to: number;
+  diff: number;
+  diffPct: number;
+}
+
+export interface ScriptTroubleChange {
+  scriptId: number;
+  scriptName: string;
+  metric: string;
+  from: number;
+  to: number;
+  diff: number;
+  diffPct: number;
+}
+
+export interface ComparisonResult {
+  meta: {
+    periodA: FilterMeta;
+    periodB: FilterMeta;
+    comparisonDescription: string;
+  };
+  crossGenderRefusalRate: MetricChange;
+  averageOnSiteChanges: MetricChange;
+  totalAllocations: MetricChange;
+  crossGenderCount: MetricChange;
+  genderTroubleScripts: {
+    periodA: GenderTroubleScript[];
+    periodB: GenderTroubleScript[];
+    changed: ScriptTroubleChange[];
+  };
+  changeReasons: string[];
+}

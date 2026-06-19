@@ -8,6 +8,8 @@ import {
   getOnSiteChangesTrend,
   getGenderTroubleScripts,
   getStatsSummary,
+  compareStatsByPeriod,
+  compareStatsByStore,
   StatsFilters
 } from '../models/statsModel';
 
@@ -163,6 +165,55 @@ router.get('/summary', handleAsync(async (req: Request, res: Response) => {
       insights: summary.insights
     }
   });
+}));
+
+router.get('/compare/period', handleAsync(async (req: Request, res: Response) => {
+  const aDays = req.query.a_days;
+  const bDays = req.query.b_days;
+
+  if (aDays === undefined || bDays === undefined) {
+    res.status(400).json({ success: false, error: '缺少必要参数：a_days 和 b_days' });
+    return;
+  }
+
+  const filtersA: StatsFilters = {};
+  const filtersB: StatsFilters = {};
+
+  const aStoreId = req.query.a_store_id ? Number(req.query.a_store_id) : undefined;
+  const aScriptId = req.query.a_script_id ? Number(req.query.a_script_id) : undefined;
+  const aDaysNum = Number(aDays);
+  if (aStoreId !== undefined && !isNaN(aStoreId)) filtersA.storeId = aStoreId;
+  if (aScriptId !== undefined && !isNaN(aScriptId)) filtersA.scriptId = aScriptId;
+  if (!isNaN(aDaysNum)) filtersA.days = aDaysNum;
+
+  const bStoreId = req.query.b_store_id ? Number(req.query.b_store_id) : undefined;
+  const bScriptId = req.query.b_script_id ? Number(req.query.b_script_id) : undefined;
+  const bDaysNum = Number(bDays);
+  if (bStoreId !== undefined && !isNaN(bStoreId)) filtersB.storeId = bStoreId;
+  if (bScriptId !== undefined && !isNaN(bScriptId)) filtersB.scriptId = bScriptId;
+  if (!isNaN(bDaysNum)) filtersB.days = bDaysNum;
+
+  const result = compareStatsByPeriod(filtersA, filtersB);
+  res.json({ success: true, data: result });
+}));
+
+router.get('/compare/store', handleAsync(async (req: Request, res: Response) => {
+  const storeIdA = req.query.store_id_a;
+  const storeIdB = req.query.store_id_b;
+
+  if (storeIdA === undefined || storeIdB === undefined) {
+    res.status(400).json({ success: false, error: '缺少必要参数：store_id_a 和 store_id_b' });
+    return;
+  }
+
+  const commonFilters: StatsFilters = {};
+  const scriptId = req.query.script_id ? Number(req.query.script_id) : undefined;
+  const days = req.query.days ? Number(req.query.days) : undefined;
+  if (scriptId !== undefined && !isNaN(scriptId)) commonFilters.scriptId = scriptId;
+  if (days !== undefined && !isNaN(days)) commonFilters.days = days;
+
+  const result = compareStatsByStore(Number(storeIdA), Number(storeIdB), commonFilters);
+  res.json({ success: true, data: result });
 }));
 
 export default router;

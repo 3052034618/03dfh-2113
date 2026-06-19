@@ -1,4 +1,4 @@
-import { Player, Character, Rule, AllocationSuggestion, CharacterRelationship, ScriptType, DmCommunicationPoint, LeadRecommendation, CrossGenderCandidate, SimulationResult, SimulationDiff } from '../types';
+import { Player, Character, Rule, AllocationSuggestion, CharacterRelationship, ScriptType, DmCommunicationPoint, LeadRecommendation, CrossGenderCandidate, SimulationResult, SimulationDiff, PlayerScoreDiff } from '../types';
 import { evaluatePlayerCharacterPair } from '../rules/ruleEngine';
 
 function permute(arr: number[]): number[][] {
@@ -453,50 +453,107 @@ function computeAllocationDiff(
   target: AllocationSuggestion
 ): SimulationDiff {
   const roleChanges: { playerName: string; fromCharacter: string; toCharacter: string }[] = [];
+  const playerScoreDiffs: PlayerScoreDiff[] = [];
 
-  const baseAssignments = new Map<string, string>();
+  const baseAssignments = new Map<string, { character: string; score: number; reasons: string[] }>();
   for (const a of base.assignments) {
-    baseAssignments.set(a.player.name, a.character.name);
+    baseAssignments.set(a.player.name, {
+      character: a.character.name,
+      score: a.score,
+      reasons: a.reasons,
+    });
   }
 
+  const targetAssignments = new Map<string, { character: string; score: number; reasons: string[] }>();
   for (const a of target.assignments) {
-    const baseChar = baseAssignments.get(a.player.name);
-    if (baseChar && baseChar !== a.character.name) {
-      roleChanges.push({
-        playerName: a.player.name,
-        fromCharacter: baseChar,
-        toCharacter: a.character.name
-      });
-    }
+    targetAssignments.set(a.player.name, {
+      character: a.character.name,
+      score: a.score,
+      reasons: a.reasons,
+    });
   }
 
-  const baseRuleMap = new Map<string, number>();
-  const targetRuleMap = new Map<string, number>();
-  for (const r of base.appliedRules) baseRuleMap.set(r.code, r.version);
-  for (const r of target.appliedRules) targetRuleMap.set(r.code, r.version);
+  const allPlayers = new Set([...baseAssignments.keys(), ...targetAssignments.keys()]);
+
+  for (const pName of allPlayers) {
+    const b = baseAssignments.get(pName);
+    const t = targetAssignments.get(pName);
+    const fromChar = b?.character ?? '未分配';
+    const toChar = t?.character ?? '未分配';
+    const scoreDiff = Math.round(((t?.score ?? 0) - (b?.score ?? 0)) * 100) / 100;
+
+    if (b && t && b.character !== t.character) {
+      roleChanges.push({ playerName: pName, fromCharacter: fromChar, toCharacter: toChar });
+    }
+
+    const diffReasons: string[] = [];
+    if (t && b) {
+      const tSet = new Set(t.reasons);
+      const bSet = new Set(b.reasons);
+      for (const r of t.reasons) if (!bSet.has(r)) diffReasons.push(`新增：${r}`);
+      for (const r of b.reasons) if (!tSet.has(r)) diffReasons.push(`移除：${r}`);
+    } else if (t && !b) {
+      for (const r of t.reasons) diffReasons.push(`新分配：${r}`);
+    } else if (!t && b) {
+      for (const r of b.reasons) diffReasons.push(`不再分配：${r}`);
+    }
+    const biggestScoreReason = diffReasons.length > 0
+      ? diffReasons.join('；')
+      : (scoreDiff > 0 ? '命中规则权重提升' : scoreDiff < 0 ? '命中规则权重降低' : '规则命中及得分基本持平');
+
+    playerScoreDiffs.push({
+      playerName: pName,
+      fromCharacter: fromChar,
+      toCharacter: toChar,
+      scoreDiff,
+      biggestScoreReason,
+    });
+  }
+
+  playerScoreDiffs.sort((x, y) => Math.abs(y.scoreDiff) - Math.abs(x.scoreDiff));
+
+  const baseRuleMap = new Map<string, { version: number; name: string }>();
+  const targetRuleMap = new Map<string, { version: number; name: string }>();
+  for (const r of base.appliedRules) baseRuleMap.set(r.code, { version: r.version, name: r.name });
+  for (const r of target.appliedRules) targetRuleMap.set(r.code, { version: r.version, name: r.name });
 
   const added: { code: string; version: number }[] = [];
   const removed: { code: string; version: number }[] = [];
   const changed: { code: string; fromVersion: number; toVersion: number }[] = [];
 
-  for (const [code, version] of targetRuleMap) {
+  for (const [code, info] of targetRuleMap) {
     if (!baseRuleMap.has(code)) {
-      added.push({ code, version });
-    } else if (baseRuleMap.get(code) !== version) {
-      changed.push({ code, fromVersion: baseRuleMap.get(code)!, toVersion: version });
+      added.push({ code, version: info.version });
+    } else if (baseRuleMap.get(code)!.version !== info.version) {
+      changed.push({ code, fromVersion: baseRuleMap.get(code)!.version, toVersion: info.version });
     }
   }
 
-  for (const [code, version] of baseRuleMap) {
+  for (const [code, info] of baseRuleMap) {
     if (!targetRuleMap.has(code)) {
-      removed.push({ code, version });
+      removed.push({ code, version: info.version });
     }
   }
+
+  const hitRuleVersions = {
+    current: Array.from(baseRuleMap.entries()).map(([code, info]) => ({
+      code,
+      version: info.version,
+      name: info.name,
+    })),
+    compare: Array.from(targetRuleMap.entries()).map(([code, info]) => ({
+      code,
+      version: info.version,
+      name: info.name,
+    })),
+  };
 
   return {
     roleChanges,
     crossGenderCountDiff: target.crossGenderCount - base.crossGenderCount,
     totalScoreDiff: Math.round((target.totalScore - base.totalScore) * 100) / 100,
-    ruleVersionDiff: { added, removed, changed }
+    ruleVersionDiff: { added, removed, changed },
+    playerScoreDiffs,
+    hitRuleVersions,
   };
 }

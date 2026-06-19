@@ -14,7 +14,8 @@ import {
   publishVersion,
   rollbackToVersion,
   getActiveRulesForStore,
-  parseGrayStoreIds
+  parseGrayStoreIds,
+  getAuditLogs
 } from '../models/ruleModel';
 import { getAvailableRuleCodes, getDefaultApplicableTypes } from '../rules/ruleEngine';
 import { parseRuleScope } from '../models/ruleModel';
@@ -61,6 +62,10 @@ const createVersionSchema = z.object({
 const publishSchema = z.object({
   grayStoreIds: z.array(z.number()).optional().default([])
 });
+
+function getOperator(req: Request): string {
+  return (req.header('X-Operator-Name') as string) || (req.body as any)?.operator || 'admin';
+}
 
 function formatRuleResponse(rule: any) {
   const scope = parseRuleScope(rule);
@@ -109,6 +114,17 @@ router.get('/available-codes', (req: Request, res: Response) => {
   });
 });
 
+router.get('/audit-logs', handleAsync(async (req: Request, res: Response) => {
+  const ruleCode = req.query.rule_code as string | undefined;
+  const action = req.query.action as any;
+  const operator = req.query.operator as string | undefined;
+  const limitParam = req.query.limit as string | undefined;
+  const limit = limitParam ? parseInt(limitParam) : 50;
+
+  const logs = getAuditLogs({ ruleCode, action, operator, limit });
+  res.json({ success: true, data: logs });
+}));
+
 router.get('/versions/:code', handleAsync(async (req: Request, res: Response) => {
   const code = req.params.code;
   const versions = getVersionsByCode(code);
@@ -140,6 +156,12 @@ router.get('/active-for-store/:storeId', handleAsync(async (req: Request, res: R
   });
 }));
 
+router.get('/:code/audit-logs', handleAsync(async (req: Request, res: Response) => {
+  const code = req.params.code;
+  const logs = getAuditLogs({ ruleCode: code, limit: 50 });
+  res.json({ success: true, data: logs });
+}));
+
 router.get('/:id', handleAsync(async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   if (isNaN(id)) {
@@ -169,7 +191,8 @@ router.post('/', validateBody(createRuleSchema), handleAsync(async (req: Request
   }
 
   try {
-    const id = createRule(name, code, description || '', priority, enabled, config, scope, status);
+    const operator = getOperator(req);
+    const id = createRule(name, code, description || '', priority, enabled, config, scope, status, undefined, undefined, operator);
     const rule = getRuleById(id)!;
     res.status(201).json({ success: true, data: formatRuleResponse(rule) });
   } catch (err: any) {
@@ -186,9 +209,10 @@ router.post('/:code/versions', validateBody(createVersionSchema), handleAsync(as
   const { name, description, priority, config, scope, status } = req.body;
 
   try {
+    const operator = getOperator(req);
     const newId = createNewVersion(code, {
       name, description, priority, config, scope
-    }, status);
+    }, status, operator);
     const rule = getRuleById(newId)!;
     res.status(201).json({ success: true, data: formatRuleResponse(rule) });
   } catch (err: any) {
@@ -214,7 +238,8 @@ router.post('/:id/publish', validateBody(publishSchema), handleAsync(async (req:
   }
 
   const { grayStoreIds } = req.body;
-  const success = publishVersion(id, grayStoreIds.length > 0 ? { grayStoreIds } : undefined);
+  const operator = getOperator(req);
+  const success = publishVersion(id, grayStoreIds.length > 0 ? { grayStoreIds } : undefined, operator);
   if (!success) {
     res.status(500).json({ success: false, error: '发布失败' });
     return;
@@ -236,8 +261,9 @@ router.post('/:code/rollback/:version', handleAsync(async (req: Request, res: Re
     return;
   }
 
+  const operator = getOperator(req);
   try {
-    const newId = rollbackToVersion(code, version);
+    const newId = rollbackToVersion(code, version, operator);
     const rule = getRuleById(newId)!;
     res.json({
       success: true,
@@ -274,7 +300,8 @@ router.put('/:id', validateBody(updateRuleSchema), handleAsync(async (req: Reque
     return;
   }
 
-  const success = updateRule(id, req.body);
+  const operator = getOperator(req);
+  const success = updateRule(id, req.body, operator);
   if (!success) {
     res.status(500).json({ success: false, error: '更新失败' });
     return;

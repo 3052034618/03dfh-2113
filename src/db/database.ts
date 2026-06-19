@@ -119,6 +119,20 @@ export async function initDb(): Promise<void> {
       reasons_json TEXT DEFAULT '[]',
       FOREIGN KEY (allocation_id) REFERENCES allocations(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS rule_audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_code TEXT NOT NULL,
+      rule_id INTEGER,
+      rule_version INTEGER,
+      action TEXT NOT NULL,
+      operator TEXT NOT NULL DEFAULT 'system',
+      old_status TEXT,
+      new_status TEXT,
+      affected_store_ids_json TEXT DEFAULT '[]',
+      detail_json TEXT DEFAULT '{}',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   try {
@@ -127,6 +141,9 @@ export async function initDb(): Promise<void> {
     db.exec('CREATE INDEX IF NOT EXISTS idx_allocations_script ON allocations(script_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_allocation_results_alloc ON allocation_results(allocation_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_allocations_started ON allocations(started_at)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_rule_audit_code ON rule_audit_logs(rule_code)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_rule_audit_action ON rule_audit_logs(action)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_rule_audit_created ON rule_audit_logs(created_at)');
   } catch (e) {
     // ignore index errors
   }
