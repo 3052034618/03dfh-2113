@@ -76,14 +76,19 @@ export async function initDb(): Promise<void> {
     CREATE TABLE IF NOT EXISTS rules (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
-      code TEXT NOT NULL UNIQUE,
+      code TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'published',
+      parent_version_id INTEGER,
       description TEXT,
       priority INTEGER DEFAULT 50,
       enabled INTEGER DEFAULT 1,
       config_json TEXT DEFAULT '{}',
       scope_json TEXT DEFAULT '{}',
+      gray_store_ids_json TEXT DEFAULT '[]',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(code, version)
     );
 
     CREATE TABLE IF NOT EXISTS allocations (
@@ -92,6 +97,7 @@ export async function initDb(): Promise<void> {
       script_id INTEGER NOT NULL,
       players_json TEXT NOT NULL,
       suggestion_json TEXT NOT NULL,
+      rule_versions_json TEXT DEFAULT '[]',
       cross_gender_count INTEGER DEFAULT 0,
       cross_gender_refused INTEGER DEFAULT 0,
       on_site_changes INTEGER DEFAULT 0,
@@ -155,6 +161,76 @@ function runMigrations(): void {
     db.exec('UPDATE allocations SET started_at = created_at WHERE started_at IS NULL');
   } catch (e) {
     // ignore
+  }
+
+  const hasVersion = columnExists('rules', 'version');
+  const hasStatus = columnExists('rules', 'status');
+  const hasRuleVersionsJson = columnExists('allocations', 'rule_versions_json');
+
+  if (!hasVersion || !hasStatus) {
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS rules_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          code TEXT NOT NULL,
+          version INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL DEFAULT 'published',
+          parent_version_id INTEGER,
+          description TEXT,
+          priority INTEGER DEFAULT 50,
+          enabled INTEGER DEFAULT 1,
+          config_json TEXT DEFAULT '{}',
+          scope_json TEXT DEFAULT '{}',
+          gray_store_ids_json TEXT DEFAULT '[]',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(code, version)
+        );
+
+        INSERT INTO rules_new (id, name, code, version, status, description, priority, enabled, config_json, scope_json, created_at, updated_at)
+        SELECT id, name, code, 1, 'published', description, priority, enabled, config_json,
+               COALESCE(scope_json, '{}'), created_at, updated_at FROM rules;
+
+        DROP TABLE rules;
+        ALTER TABLE rules_new RENAME TO rules;
+      `);
+    } catch (e) {
+      console.log('Migration warning: rules table upgrade skipped:', e);
+    }
+  }
+
+  if (!hasRuleVersionsJson) {
+    try {
+      db.exec("ALTER TABLE allocations ADD COLUMN rule_versions_json TEXT DEFAULT '[]'");
+    } catch (e) {
+      // column may already exist
+    }
+  }
+
+  const hasGrayStoreIds = columnExists('rules', 'gray_store_ids_json');
+  if (!hasGrayStoreIds) {
+    try {
+      db.exec("ALTER TABLE rules ADD COLUMN gray_store_ids_json TEXT DEFAULT '[]'");
+    } catch (e) {
+      // column may already exist
+    }
+  }
+
+  const hasParentVersionId = columnExists('rules', 'parent_version_id');
+  if (!hasParentVersionId) {
+    try {
+      db.exec('ALTER TABLE rules ADD COLUMN parent_version_id INTEGER');
+    } catch (e) {
+      // column may already exist
+    }
+  }
+
+  try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_rules_code_status ON rules(code, status)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_allocations_store_script ON allocations(store_id, script_id)');
+  } catch (e) {
+    // ignore index errors
   }
 }
 

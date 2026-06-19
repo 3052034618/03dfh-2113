@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { validateBody, handleAsync } from '../middleware/validation';
-import { generateAllocationSuggestion, getTopCandidates } from '../services/allocationService';
-import { getEnabledRules } from '../models/ruleModel';
+import { generateAllocationSuggestion, getTopCandidates, simulateAllocation } from '../services/allocationService';
+import { getActiveRulesForStore, getPublishedRules, getDraftRules, getRuleByCodeAndVersion } from '../models/ruleModel';
 import { getScriptById, getCharactersByScriptId, getRelationshipsByScriptId } from '../models/scriptModel';
 import { getStoreById } from '../models/storeModel';
 import { filterApplicableRules } from '../rules/ruleEngine';
@@ -10,9 +10,12 @@ import {
   createAllocation,
   getAllocationById,
   getAllocationsByStoreId,
+  getAllocationsByFilters,
   updateAllocationFeedback,
-  getAllAllocations
+  getAllAllocations,
+  parseRuleVersions
 } from '../models/allocationModel';
+import { StatsFilters } from '../models/statsModel';
 
 const router = Router();
 
@@ -32,6 +35,17 @@ const allocateSchema = z.object({
   store_id: z.number().int().positive(),
   script_id: z.number().int().positive(),
   players: z.array(playerSchema).min(1).max(20)
+});
+
+const simulateSchema = z.object({
+  store_id: z.number().int().positive(),
+  script_id: z.number().int().positive(),
+  players: z.array(playerSchema).min(1).max(20),
+  compare_draft: z.boolean().optional().default(false),
+  specified_versions: z.array(z.object({
+    code: z.string(),
+    version: z.number().int().positive()
+  })).optional()
 });
 
 const feedbackSchema = z.object({
@@ -62,14 +76,27 @@ router.post('/allocate', validateBody(allocateSchema), handleAsync(async (req: R
   }
 
   const relationships = getRelationshipsByScriptId(script_id);
-  const allRules = getEnabledRules();
-  const applicableRules = filterApplicableRules(allRules, script.type, store_id);
+  const activeRules = getActiveRulesForStore(store_id);
+  const applicableRules = filterApplicableRules(activeRules, script.type, store_id);
 
   const suggestion = generateAllocationSuggestion(players, characters, applicableRules, relationships, script.type);
 
-  const allocationId = createAllocation(store_id, script_id, players, suggestion, suggestion.crossGenderCount);
+  const ruleVersions = suggestion.appliedRules.map(r => ({
+    id: r.id,
+    code: r.code,
+    version: r.version,
+    name: r.name,
+    status: 'published' as const,
+    priority: r.priority
+  }));
+
+  const allocationId = createAllocation(store_id, script_id, players, suggestion, suggestion.crossGenderCount, ruleVersions);
 
   const topCandidates = getTopCandidates(players, characters, applicableRules, 3);
+
+  const grayRuleVersions = ruleVersions.filter(r =>
+    activeRules.find(ar => ar.id === r.id)?.status === 'gray'
+  );
 
   res.json({
     success: true,
@@ -77,6 +104,8 @@ router.post('/allocate', validateBody(allocateSchema), handleAsync(async (req: R
       allocation_id: allocationId,
       script: { id: script.id, name: script.name, type: script.type },
       store: { id: store.id, name: store.name },
+      rule_versions: ruleVersions,
+      gray_rule_versions: grayRuleVersions,
       suggestion: {
         assignments: suggestion.assignments.map(a => ({
           player: a.player,
@@ -104,17 +133,99 @@ router.post('/allocate', validateBody(allocateSchema), handleAsync(async (req: R
   });
 }));
 
-router.get('/', handleAsync(async (req: Request, res: Response) => {
-  const storeId = req.query.store_id ? parseInt(req.query.store_id as string) : null;
-  const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+router.post('/simulate', validateBody(simulateSchema), handleAsync(async (req: Request, res: Response) => {
+  const { store_id, script_id, players, compare_draft, specified_versions } = req.body;
 
-  let allocations;
-  if (storeId) {
-    if (isNaN(storeId)) {
-      res.status(400).json({ success: false, error: '无效的门店ID' });
+  const store = getStoreById(store_id);
+  if (!store) {
+    res.status(404).json({ success: false, error: '门店不存在' });
+    return;
+  }
+
+  const script = getScriptById(script_id);
+  if (!script) {
+    res.status(404).json({ success: false, error: '剧本不存在' });
+    return;
+  }
+
+  const characters = getCharactersByScriptId(script_id);
+  if (characters.length === 0) {
+    res.status(400).json({ success: false, error: '该剧本暂无角色配置' });
+    return;
+  }
+
+  const relationships = getRelationshipsByScriptId(script_id);
+
+  const currentRules = filterApplicableRules(getActiveRulesForStore(store_id), script.type, store_id);
+
+  let draftRules;
+  if (compare_draft) {
+    const drafts = getDraftRules();
+    const latestDrafts = new Map<string, typeof drafts[0]>();
+    for (const d of drafts) {
+      const existing = latestDrafts.get(d.code);
+      if (!existing || d.version > existing.version) {
+        latestDrafts.set(d.code, d);
+      }
+    }
+    const merged = currentRules.map(r => latestDrafts.get(r.code) || r);
+    for (const d of latestDrafts.values()) {
+      if (!merged.find(r => r.code === d.code)) {
+        merged.push(d);
+      }
+    }
+    draftRules = filterApplicableRules(merged, script.type, store_id);
+  }
+
+  let specifiedRules;
+  if (specified_versions && specified_versions.length > 0) {
+    const specified = specified_versions.map((sv: { code: string; version: number }) => getRuleByCodeAndVersion(sv.code, sv.version)).filter(Boolean) as any[];
+    if (specified.length === 0) {
+      res.status(400).json({ success: false, error: '未找到指定版本的规则' });
       return;
     }
-    allocations = getAllocationsByStoreId(storeId, limit);
+    const merged = currentRules.map(r => {
+      const s = specified.find(sp => sp.code === r.code);
+      return s || r;
+    });
+    for (const s of specified) {
+      if (!merged.find(r => r.code === s.code)) {
+        merged.push(s);
+      }
+    }
+    specifiedRules = filterApplicableRules(merged, script.type, store_id);
+  }
+
+  const result = simulateAllocation(players, characters, relationships, script.type, {
+    currentRules,
+    draftRules,
+    specifiedRules
+  });
+
+  res.json({
+    success: true,
+    data: {
+      script: { id: script.id, name: script.name, type: script.type },
+      store: { id: store.id, name: store.name },
+      simulation: result
+    }
+  });
+}));
+
+router.get('/', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.query.store_id ? parseInt(req.query.store_id as string) : undefined;
+  const scriptId = req.query.script_id ? parseInt(req.query.script_id as string) : undefined;
+  const days = req.query.days ? parseInt(req.query.days as string) : undefined;
+  const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+
+  const filters: StatsFilters = {};
+  if (storeId !== undefined && !isNaN(storeId)) filters.storeId = storeId;
+  if (scriptId !== undefined && !isNaN(scriptId)) filters.scriptId = scriptId;
+  if (days !== undefined && !isNaN(days)) filters.days = days;
+
+  let allocations;
+  if (filters.storeId !== undefined || filters.scriptId !== undefined || filters.days !== undefined) {
+    allocations = getAllocationsByFilters(filters, limit);
   } else {
     allocations = getAllAllocations(limit);
   }
@@ -130,8 +241,10 @@ router.get('/', handleAsync(async (req: Request, res: Response) => {
       on_site_changes: a.on_site_changes,
       status: a.status,
       started_at: a.started_at,
-      created_at: a.created_at
-    }))
+      created_at: a.created_at,
+      rule_versions: parseRuleVersions(a)
+    })),
+    filters_applied: filters
   });
 }));
 
@@ -165,6 +278,7 @@ router.get('/:id', handleAsync(async (req: Request, res: Response) => {
       script_id: allocation.script_id,
       players: playersData,
       suggestion: suggestionData,
+      rule_versions: parseRuleVersions(allocation),
       cross_gender_count: allocation.cross_gender_count,
       cross_gender_refused: allocation.cross_gender_refused,
       on_site_changes: allocation.on_site_changes,

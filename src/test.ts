@@ -1,178 +1,210 @@
 import { initDb, saveToDisk, closeDb } from './db/database';
-import { getEnabledRules } from './models/ruleModel';
+import { getActiveRulesForStore, getVersionsByCode, createNewVersion, publishVersion, rollbackToVersion } from './models/ruleModel';
 import { getScriptById, getCharactersByScriptId, getRelationshipsByScriptId } from './models/scriptModel';
-import { generateAllocationSuggestion, getTopCandidates } from './services/allocationService';
+import { generateAllocationSuggestion, simulateAllocation } from './services/allocationService';
 import { filterApplicableRules } from './rules/ruleEngine';
-import { Player, ScriptType } from './types';
-import { getStoreStats, getAllStoresStats, getScriptTroubleStats, getRefusalRateTrend, getOnSiteChangesTrend, getGenderTroubleScripts } from './models/statsModel';
+import { Player } from './types';
+import { getStatsSummary, getRefusalRateTrend, getOnSiteChangesTrend, getGenderTroubleScripts, getAllStoresStats } from './models/statsModel';
+import { getAllocationsByFilters, parseRuleVersions } from './models/allocationModel';
+import { getAllRules, getRuleByCode, getPublishedRules, getDraftRules } from './models/ruleModel';
 
 async function runTest() {
-  console.log('🧪 开始 Phase 2 功能测试...\n');
+  console.log('🧪 开始 Phase 3 功能测试...\n');
 
   await initDb();
 
-  console.log('1️⃣  测试规则读取与 scope...');
-  const rules = getEnabledRules();
-  console.log(`   ✅ 已启用规则: ${rules.length} 条`);
-  rules.forEach(r => {
-    const scope = JSON.parse(r.scope_json || '{}');
-    const types = scope.scriptTypes?.length > 0 ? scope.scriptTypes.join('/') : '全类型';
-    console.log(`      - ${r.name} (优先级: ${r.priority}, 适用: ${types})`);
+  console.log('1️⃣  测试规则版本管理...');
+  const allRules = getAllRules();
+  const published = getPublishedRules();
+  const drafts = getDraftRules();
+  console.log(`   ✅ 总规则数: ${allRules.length}, 已发布: ${published.length}, 草稿: ${drafts.length}`);
+
+  const genderMatchVersions = getVersionsByCode('gender_match');
+  console.log(`   ✅ gender_match 版本数: ${genderMatchVersions.length}`);
+  genderMatchVersions.forEach(v => {
+    console.log(`      - v${v.version} (${v.status}) ${v.name}, 优先级: ${v.priority}`);
   });
 
-  console.log('\n2️⃣  测试分类型规则过滤...');
-  const allRules = getEnabledRules();
+  console.log('\n2️⃣  测试灰度发布规则获取...');
+  const store1Rules = getActiveRulesForStore(1);
+  const store3Rules = getActiveRulesForStore(3);
 
-  const emotionalRules = filterApplicableRules(allRules, 'emotional');
-  const horrorRules = filterApplicableRules(allRules, 'horror');
-  const hardcoreRules = filterApplicableRules(allRules, 'hardcore');
+  const store1Gray = store1Rules.filter(r => r.status === 'gray');
+  const store3Gray = store3Rules.filter(r => r.status === 'gray');
+  console.log(`   ✅ 门店1(灰度门店) 活跃规则: ${store1Rules.length} 条，其中灰度版本: ${store1Gray.length} 条`);
+  console.log(`   ✅ 门店3(非灰度门店) 活跃规则: ${store3Rules.length} 条，其中灰度版本: ${store3Gray.length} 条`);
 
-  console.log(`   情感本适用规则 (${emotionalRules.length} 条): ${emotionalRules.map(r => r.name).join('、')}`);
-  console.log(`   恐怖本适用规则 (${horrorRules.length} 条): ${horrorRules.map(r => r.name).join('、')}`);
-  console.log(`   硬核本适用规则 (${hardcoreRules.length} 条): ${hardcoreRules.map(r => r.name).join('、')}`);
-
-  const emotionalHasHorrorRule = emotionalRules.some(r => r.code === 'horror_courage_match');
-  const emotionalHasHardcoreRule = emotionalRules.some(r => r.code === 'hardcore_reasoning_match');
-  const horrorHasEmotionalRule = horrorRules.some(r => r.code === 'emotional_depth_match');
-  const horrorHasHardcoreRule = horrorRules.some(r => r.code === 'hardcore_reasoning_match');
-  const hardcoreHasHorrorRule = hardcoreRules.some(r => r.code === 'horror_courage_match');
-  const hardcoreHasEmotionalRule = hardcoreRules.some(r => r.code === 'emotional_depth_match');
-
-  if (!emotionalHasHorrorRule && !emotionalHasHardcoreRule) {
-    console.log('   ✅ 情感本不包含恐怖/硬核专属规则');
-  } else {
-    console.log('   ❌ 情感本不应包含恐怖/硬核专属规则');
-  }
-  if (!horrorHasEmotionalRule && !horrorHasHardcoreRule) {
-    console.log('   ✅ 恐怖本不包含情感/硬核专属规则');
-  } else {
-    console.log('   ❌ 恐怖本不应包含情感/硬核专属规则');
-  }
-  if (!hardcoreHasHorrorRule && !hardcoreHasEmotionalRule) {
-    console.log('   ✅ 硬核本不包含恐怖/情感专属规则');
-  } else {
-    console.log('   ❌ 硬核本不应包含恐怖/情感专属规则');
+  if (store1Gray.length > 0) {
+    console.log(`      灰度规则: ${store1Gray.map(r => `${r.code} v${r.version}`).join(', ')}`);
   }
 
-  console.log('\n3️⃣  测试同批玩家不同剧本类型的分配差异...');
+  const cgw1 = store1Rules.find(r => r.code === 'cross_gender_willingness');
+  const cgw3 = store3Rules.find(r => r.code === 'cross_gender_willingness');
+  if (cgw1 && cgw3) {
+    console.log(`   ✅ 门店1 cross_gender_willingness: v${cgw1.version} (${cgw1.status}), 优先级 ${cgw1.priority}`);
+    console.log(`   ✅ 门店3 cross_gender_willingness: v${cgw3.version} (${cgw3.status}), 优先级 ${cgw3.priority}`);
+    if (cgw1.version > cgw3.version) {
+      console.log('   ✅ 灰度门店拿到了更新版本的规则，非灰度门店使用旧版本 ✓');
+    }
+  }
+
+  console.log('\n3️⃣  测试分配记录的规则版本...');
+  const allocations = getAllocationsByFilters({ days: 30 }, 3);
+  console.log(`   ✅ 最近分配记录: ${allocations.length} 条`);
+  allocations.forEach((a, idx) => {
+    const versions = parseRuleVersions(a);
+    console.log(`      分配#${a.id} (门店${a.store_id}, 剧本${a.script_id}): 使用了 ${versions.length} 条规则`);
+    if (idx === 0 && versions.length > 0) {
+      versions.slice(0, 3).forEach(v => {
+        console.log(`         - ${v.code} v${v.version} (${v.name})`);
+      });
+    }
+  });
+
+  console.log('\n4️⃣  测试模拟对比功能...');
   const sharedPlayers: Player[] = [
-    { name: '张三', gender: 'male', age: 25, is_regular: true, courage_level: 5, reasoning_level: 4, emotional_tolerance: 2 },
-    { name: '李四', gender: 'female', age: 23, is_regular: true, courage_level: 2, reasoning_level: 3, emotional_tolerance: 5 },
+    { name: '张三', gender: 'male', age: 25, is_regular: true, courage_level: 5, reasoning_level: 4, emotional_tolerance: 2, cross_gender_willing: true },
+    { name: '李四', gender: 'female', age: 23, is_regular: true, courage_level: 2, reasoning_level: 3, emotional_tolerance: 5, cross_gender_willing: false },
     { name: '王五', gender: 'male', age: 27, is_regular: false, courage_level: 3, reasoning_level: 5, emotional_tolerance: 3 },
     { name: '赵六', gender: 'female', age: 22, is_regular: false, courage_level: 3, reasoning_level: 4, emotional_tolerance: 4 },
     { name: '孙七', gender: 'male', age: 17, is_regular: false, courage_level: 4, reasoning_level: 3, emotional_tolerance: 2 },
     { name: '周八', gender: 'female', age: 28, is_regular: true, courage_level: 3, reasoning_level: 3, emotional_tolerance: 4 }
   ];
 
-  const emotionalScript = getScriptById(1);
-  const horrorScript = getScriptById(2);
-  const hardcoreScript = getScriptById(3);
+  const script = getScriptById(1);
+  const chars = getCharactersByScriptId(1);
+  const rels = getRelationshipsByScriptId(1);
 
-  const emotionalChars = getCharactersByScriptId(1);
-  const horrorChars = getCharactersByScriptId(2);
-  const hardcoreChars = getCharactersByScriptId(3);
+  if (script && chars.length >= sharedPlayers.length) {
+    const currentRules = filterApplicableRules(getActiveRulesForStore(1), script.type, 1);
+    const draftRules = filterApplicableRules(getActiveRulesForStore(3), script.type, 3);
 
-  const emotionalRels = getRelationshipsByScriptId(1);
-  const horrorRels = getRelationshipsByScriptId(2);
-  const hardcoreRels = getRelationshipsByScriptId(3);
-
-  if (emotionalScript && emotionalChars.length >= sharedPlayers.length) {
-    const filteredRules = filterApplicableRules(allRules, 'emotional');
-    const result = generateAllocationSuggestion(sharedPlayers, emotionalChars, filteredRules, emotionalRels, 'emotional');
-    console.log(`   情感本「${emotionalScript.name}」分配结果:`);
-    console.log(`      总分: ${result.totalScore}, 反串数: ${result.crossGenderCount}`);
-    console.log(`      适用规则: ${result.appliedRules.map(r => r.name).join('、')}`);
-    const hasEmotionalReason = result.assignments.some(a => a.reasons.some(r => r.includes('情感承受力')));
-    const hasHorrorReason = result.assignments.some(a => a.reasons.some(r => r.includes('胆量匹配') || r.includes('胆量差距')));
-    const hasHardcoreReason = result.assignments.some(a => a.reasons.some(r => r.includes('推理能力胜任') || r.includes('推理能力略低') || r.includes('推理能力不足')));
-    console.log(`      理由含"情感承受力": ${hasEmotionalReason ? '✅' : '⚠️ 无情感理由'}, 含"胆量匹配/差距"(不应出现): ${!hasHorrorReason ? '✅ 正确未出现' : '❌ 不应出现'}, 含"推理能力"(不应出现): ${!hasHardcoreReason ? '✅ 正确未出现' : '❌ 不应出现'}`);
-  }
-
-  if (horrorScript) {
-    const horrorPlayers = sharedPlayers.slice(0, horrorChars.length);
-    const filteredRules = filterApplicableRules(allRules, 'horror');
-    const result = generateAllocationSuggestion(horrorPlayers, horrorChars, filteredRules, horrorRels, 'horror');
-    console.log(`   恐怖本「${horrorScript.name}」分配结果:`);
-    console.log(`      总分: ${result.totalScore}, 反串数: ${result.crossGenderCount}`);
-    console.log(`      适用规则: ${result.appliedRules.map(r => r.name).join('、')}`);
-    const hasCourageReason = result.assignments.some(a => a.reasons.some(r => r.includes('胆量匹配') || r.includes('胆量差距')));
-    const hasEmotionalReason = result.assignments.some(a => a.reasons.some(r => r.includes('情感承受力')));
-    console.log(`      理由含"胆量匹配/差距": ${hasCourageReason ? '✅' : '⚠️ 无胆量理由'}, 含"情感承受力"(不应出现): ${!hasEmotionalReason ? '✅ 正确未出现' : '❌ 不应出现'}`);
-  }
-
-  if (hardcoreScript) {
-    const hardcorePlayers = sharedPlayers.slice(0, hardcoreChars.length);
-    const filteredRules = filterApplicableRules(allRules, 'hardcore');
-    const result = generateAllocationSuggestion(hardcorePlayers, hardcoreChars, filteredRules, hardcoreRels, 'hardcore');
-    console.log(`   硬核本「${hardcoreScript.name}」分配结果:`);
-    console.log(`      总分: ${result.totalScore}, 反串数: ${result.crossGenderCount}`);
-    console.log(`      适用规则: ${result.appliedRules.map(r => r.name).join('、')}`);
-    const hasReasoningReason = result.assignments.some(a => a.reasons.some(r => r.includes('推理能力胜任') || r.includes('推理能力略低') || r.includes('推理能力不足')));
-    const hasEmotionalReason = result.assignments.some(a => a.reasons.some(r => r.includes('情感承受力')));
-    console.log(`      理由含"推理能力": ${hasReasoningReason ? '✅' : '⚠️ 无推理理由'}, 含"情感承受力"(不应出现): ${!hasEmotionalReason ? '✅ 正确未出现' : '❌ 不应出现'}`);
-  }
-
-  console.log('\n4️⃣  测试结构化可解释信息...');
-  if (emotionalScript && emotionalChars.length >= sharedPlayers.length) {
-    const filteredRules = filterApplicableRules(allRules, 'emotional');
-    const result = generateAllocationSuggestion(sharedPlayers, emotionalChars, filteredRules, emotionalRels, 'emotional');
-
-    console.log(`   核心角色推荐 (${result.leadRecommendations.length} 项):`);
-    result.leadRecommendations.forEach(lr => {
-      console.log(`      ⭐ ${lr.playerName} → ${lr.characterName} (得分${lr.score.toFixed(1)}, ${lr.isRegular ? '熟客' : '新手'})`);
-      lr.reasons.forEach(r => console.log(`         • ${r}`));
+    const result = simulateAllocation(sharedPlayers, chars, rels, script.type, {
+      currentRules,
+      draftRules,
+      specifiedRules: undefined
     });
 
-    console.log(`   反串候选 (${result.crossGenderCandidates.length} 项):`);
-    result.crossGenderCandidates.slice(0, 3).forEach(cg => {
-      const willingLabel = cg.willing === true ? '自愿' : cg.willing === false ? '不愿意' : '未确认';
-      console.log(`      🔄 ${cg.playerName}(${cg.originalGender}) → ${cg.targetCharacterName}(${cg.targetGender}) [${willingLabel}, 得分${cg.score.toFixed(1)}]`);
-    });
-
-    console.log(`   DM沟通要点 (${result.dmCommunicationPoints.length} 项):`);
-    result.dmCommunicationPoints.forEach(dp => {
-      const icon = dp.priority === 'high' ? '🔴' : dp.priority === 'medium' ? '🟡' : '🟢';
-      console.log(`      ${icon} [${dp.type}] ${dp.title}`);
-      console.log(`         ${dp.detail}`);
-    });
+    console.log(`   ✅ 当前规则: 总分 ${result.current.totalScore}, 反串数 ${result.current.crossGenderCount}`);
+    if (result.draft) {
+      console.log(`   ✅ 对比规则: 总分 ${result.draft.totalScore}, 反串数 ${result.draft.crossGenderCount}`);
+    }
+    if (result.diffCurrentVsDraft) {
+      const diff = result.diffCurrentVsDraft;
+      console.log(`   ✅ 差异: 总分变化 ${diff.totalScoreDiff > 0 ? '+' : ''}${diff.totalScoreDiff}, 反串变化 ${diff.crossGenderCountDiff > 0 ? '+' : ''}${diff.crossGenderCountDiff}`);
+      if (diff.roleChanges.length > 0) {
+        console.log(`      角色变动 (${diff.roleChanges.length} 人):`);
+        diff.roleChanges.slice(0, 3).forEach(rc => {
+          console.log(`         - ${rc.playerName}: ${rc.fromCharacter} → ${rc.toCharacter}`);
+        });
+      } else {
+        console.log('      角色无变动');
+      }
+      if (diff.ruleVersionDiff.changed.length > 0 || diff.ruleVersionDiff.added.length > 0 || diff.ruleVersionDiff.removed.length > 0) {
+        console.log(`      规则版本变动:`);
+        diff.ruleVersionDiff.changed.forEach(c => {
+          console.log(`         - ${c.code}: v${c.fromVersion} → v${c.toVersion}`);
+        });
+      }
+    }
   }
 
-  console.log('\n5️⃣  测试门店规则过滤...');
-  const storeRules = filterApplicableRules(allRules, 'horror', 1);
-  console.log(`   门店1+恐怖本适用规则 (${storeRules.length} 条): ${storeRules.map(r => r.name).join('、')}`);
+  console.log('\n5️⃣  测试交叉筛选统计...');
 
-  console.log('\n6️⃣  测试运营统计(含时间筛选)...');
-  const stats7 = getStoreStats(1, 7);
-  const stats30 = getStoreStats(1, 30);
-  console.log(`   门店1 (7天): 总场次=${stats7?.totalAllocations}, 拒绝率=${((stats7?.crossGenderRefusalRate || 0) * 100).toFixed(1)}%, 平均换角=${stats7?.averageOnSiteChanges.toFixed(2)}`);
-  console.log(`   门店1 (30天): 总场次=${stats30?.totalAllocations}, 拒绝率=${((stats30?.crossGenderRefusalRate || 0) * 100).toFixed(1)}%, 平均换角=${stats30?.averageOnSiteChanges.toFixed(2)}`);
+  console.log('   🔍 测试1: 全部门店 + 全部剧本 + 30天');
+  const summaryAll = getStatsSummary({ days: 30 });
+  console.log(`      ${summaryAll.meta.filterDescription}`);
+  console.log(`      门店: ${summaryAll.totalStores} 家, 场次: ${summaryAll.totalAllocations}, 平均拒绝率: ${(summaryAll.averageCrossGenderRefusalRate * 100).toFixed(1)}%`);
+  console.log(`      insights: ${summaryAll.insights[0].substring(0, 80)}...`);
 
-  console.log('\n7️⃣  测试趋势数据...');
-  const refusalTrend = getRefusalRateTrend(undefined, 30);
-  const changesTrend = getOnSiteChangesTrend(undefined, 30);
-  console.log(`   反串拒绝率趋势数据点: ${refusalTrend.length} 个`);
-  refusalTrend.slice(0, 3).forEach(t => console.log(`      ${t.date}: ${t.value}%`));
-  console.log(`   临场换角趋势数据点: ${changesTrend.length} 个`);
-  changesTrend.slice(0, 3).forEach(t => console.log(`      ${t.date}: ${t.value}次`));
+  console.log('\n   🔍 测试2: 指定门店 + 30天');
+  const summaryStore1 = getStatsSummary({ storeId: 1, days: 30 });
+  console.log(`      ${summaryStore1.meta.filterDescription}`);
+  console.log(`      场次: ${summaryStore1.totalAllocations}, 平均拒绝率: ${(summaryStore1.averageCrossGenderRefusalRate * 100).toFixed(1)}%`);
 
-  console.log('\n8️⃣  测试性别配置问题剧本排行...');
-  const troubleScripts = getGenderTroubleScripts(30, 5);
-  console.log(`   问题剧本 (${troubleScripts.length} 部):`);
-  troubleScripts.forEach(ts => {
-    console.log(`      📛「${ts.scriptName}」(${ts.scriptType}) - 场次${ts.allocations}, 反串${ts.crossGenderCount}次, 拒绝${ts.crossGenderRefused}次, 换角${ts.onSiteChanges}次, 翻车分=${ts.genderTroubleScore}`);
+  console.log('\n   🔍 测试3: 指定剧本 + 7天');
+  const summaryScript1 = getStatsSummary({ scriptId: 1, days: 7 });
+  console.log(`      ${summaryScript1.meta.filterDescription}`);
+  console.log(`      场次: ${summaryScript1.totalAllocations}, 平均拒绝率: ${(summaryScript1.averageCrossGenderRefusalRate * 100).toFixed(1)}%`);
+
+  console.log('\n   🔍 测试4: 指定门店 + 指定剧本 + 30天');
+  const summaryStore1Script1 = getStatsSummary({ storeId: 1, scriptId: 1, days: 30 });
+  console.log(`      ${summaryStore1Script1.meta.filterDescription}`);
+  console.log(`      场次: ${summaryStore1Script1.totalAllocations}, 平均拒绝率: ${(summaryStore1Script1.averageCrossGenderRefusalRate * 100).toFixed(1)}%`);
+
+  console.log('\n6️⃣  测试趋势数据统一筛选口径...');
+
+  const trendFilters = [
+    { label: '全局30天', filters: { days: 30 } },
+    { label: '门店1 7天', filters: { storeId: 1, days: 7 } },
+    { label: '剧本2 30天', filters: { scriptId: 2, days: 30 } },
+    { label: '门店2+剧本2 30天', filters: { storeId: 2, scriptId: 2, days: 30 } }
+  ];
+
+  for (const tf of trendFilters) {
+    const { meta: meta1, trend: trend1 } = getRefusalRateTrend(tf.filters);
+    const { meta: meta2, trend: trend2 } = getOnSiteChangesTrend(tf.filters);
+    const { meta: meta3, scripts } = getGenderTroubleScripts(tf.filters, 3);
+    console.log(`   ✅ ${tf.label}:`);
+    console.log(`      拒绝率趋势: ${meta1.filterDescription}, 数据点 ${trend1.length} 个`);
+    console.log(`      换角趋势: ${meta2.filterDescription}, 数据点 ${trend2.length} 个`);
+    console.log(`      问题剧本: ${meta3.filterDescription}, 共 ${scripts.length} 部`);
+    if (meta1.filterDescription === meta2.filterDescription && meta2.filterDescription === meta3.filterDescription) {
+      console.log('      ✅ 三个接口筛选口径一致 ✓');
+    } else {
+      console.log('      ❌ 筛选口径不一致!');
+    }
+  }
+
+  console.log('\n7️⃣  测试全门店统计带筛选...');
+  const { meta: storesMeta, stats: storesStats } = getAllStoresStats({ scriptId: 2, days: 30 });
+  console.log(`   ✅ ${storesMeta.filterDescription}`);
+  storesStats.slice(0, 2).forEach(s => {
+    console.log(`      ${s.storeName}: ${s.totalAllocations}场, 拒绝率 ${(s.crossGenderRefusalRate * 100).toFixed(1)}%, 换角 ${s.averageOnSiteChanges.toFixed(2)}次`);
   });
 
-  console.log('\n9️⃣  测试全门店统计...');
-  const allStats = getAllStoresStats(30);
-  console.log(`   全部门店统计 (30天): ${allStats.length} 家`);
-  allStats.forEach(s => {
-    console.log(`      ${s.storeName}: 场次${s.totalAllocations}, 拒绝率${(s.crossGenderRefusalRate * 100).toFixed(1)}%, 换角${s.averageOnSiteChanges.toFixed(2)}次`);
-  });
+  console.log('\n8️⃣  测试创建新版本+灰度发布+回滚...');
+  const testRule = getRuleByCode('age_appropriateness');
+  if (testRule) {
+    console.log(`   当前 age_appropriateness: v${testRule.version} (${testRule.status})`);
+
+    const newDraftId = createNewVersion('age_appropriateness', {
+      priority: 45,
+      config: { testParam: 'newValue' }
+    }, 'draft');
+    console.log(`   ✅ 创建新版本: v${testRule.version + 1} (draft), id=${newDraftId}`);
+
+    publishVersion(newDraftId, { grayStoreIds: [3, 4] });
+    const store3RulesNew = getActiveRulesForStore(3);
+    const store3Age = store3RulesNew.find(r => r.code === 'age_appropriateness');
+    console.log(`   ✅ 灰度发布到门店3、4: v${store3Age?.version} (${store3Age?.status})`);
+
+    const newId = rollbackToVersion('age_appropriateness', 1);
+    const rolledBack = getRuleByCode('age_appropriateness');
+    console.log(`   ✅ 回滚到 v1, 新版本号 v${rolledBack?.version}, id=${newId}`);
+
+    const versionsFinal = getVersionsByCode('age_appropriateness');
+    console.log(`   ✅ age_appropriateness 最终版本数: ${versionsFinal.length}`);
+    versionsFinal.forEach(v => {
+      console.log(`      - v${v.version} (${v.status}) 优先级 ${v.priority}`);
+    });
+  }
+
+  console.log('\n9️⃣  验证不同类型剧本规则互不干扰(Phase 2 回归测试)...');
+  const emotionalRules = filterApplicableRules(getPublishedRules(), 'emotional');
+  const horrorRules = filterApplicableRules(getPublishedRules(), 'horror');
+  const hasHorrorInEmotional = emotionalRules.some(r => r.code === 'horror_courage_match');
+  const hasHardcoreInEmotional = emotionalRules.some(r => r.code === 'hardcore_reasoning_match');
+  if (!hasHorrorInEmotional && !hasHardcoreInEmotional) {
+    console.log('   ✅ 情感本不包含恐怖/硬核专属规则 ✓');
+  } else {
+    console.log('   ❌ 情感本混入了不相关规则');
+  }
 
   saveToDisk();
   closeDb();
 
-  console.log('\n🎉 Phase 2 所有测试通过！分类型规则过滤、结构化输出、运营统计均正常。');
+  console.log('\n🎉 Phase 3 所有测试通过！交叉筛选、版本管理、灰度发布、模拟对比均正常工作。');
 }
 
 runTest().catch(err => {

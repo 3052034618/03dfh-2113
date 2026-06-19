@@ -1,13 +1,13 @@
 import { initDb, saveToDisk } from './db/database';
 import { createStore } from './models/storeModel';
 import { createScript, createCharacter, createRelationship, getScriptById } from './models/scriptModel';
-import { createRule, getRuleByCode } from './models/ruleModel';
+import { createRule, getRuleByCode, createNewVersion, publishVersion, getActiveRulesForStore } from './models/ruleModel';
 import { createAllocation, updateAllocationFeedback } from './models/allocationModel';
 import { generateAllocationSuggestion } from './services/allocationService';
 import { getEnabledRules } from './models/ruleModel';
 import { getCharactersByScriptId, getRelationshipsByScriptId } from './models/scriptModel';
 import { filterApplicableRules } from './rules/ruleEngine';
-import { Player, Gender, RuleScope } from './types';
+import { Player, Gender, RuleScope, RuleStatus } from './types';
 
 function seedStores(): number[] {
   console.log('🏪 正在创建门店数据...');
@@ -204,7 +204,7 @@ function seedRules(): number {
   for (const r of defaultRules) {
     const existing = getRuleByCode(r.code);
     if (!existing) {
-      createRule(r.name, r.code, r.description, r.priority, 1, r.config, r.scope);
+      createRule(r.name, r.code, r.description, r.priority, 1, r.config, r.scope, 'published');
       count++;
       console.log(`  ✓ ${r.name}${r.scope.scriptTypes.length > 0 ? ` (限${r.scope.scriptTypes.join('/')})` : ''}`);
     }
@@ -212,6 +212,22 @@ function seedRules(): number {
 
   if (count === 0) {
     console.log('  （规则已存在，跳过）');
+  } else {
+    console.log('');
+    console.log('📝 正在创建规则版本和灰度发布数据...');
+
+    const draftId = createNewVersion('gender_match', {
+      name: '性别匹配优先(优化版)',
+      priority: 85
+    }, 'draft');
+    console.log(`  ✓ 创建草稿版本: gender_match v2 (draft)`);
+
+    const grayId = createNewVersion('cross_gender_willingness', {
+      priority: 90,
+      config: { willingBonus: 15, unwillingPenalty: -30 }
+    }, 'draft');
+    publishVersion(grayId, { grayStoreIds: [1, 2] });
+    console.log(`  ✓ 灰度发布: cross_gender_willingness v2 到门店1、2`);
   }
   return count;
 }
@@ -305,8 +321,6 @@ function seedSampleAllocations(storeIds: number[], scriptIds: number[]): void {
     }
   ];
 
-  const rules = getEnabledRules();
-
   for (const set of playersSets) {
     const storeId = storeIds[set.storeIdx];
     const scriptId = scriptIds[set.scriptIdx];
@@ -315,10 +329,21 @@ function seedSampleAllocations(storeIds: number[], scriptIds: number[]): void {
 
     const characters = getCharactersByScriptId(scriptId);
     const relationships = getRelationshipsByScriptId(scriptId);
-    const applicableRules = filterApplicableRules(rules, script.type, storeId);
+    const activeRules = getActiveRulesForStore(storeId);
+    const applicableRules = filterApplicableRules(activeRules, script.type, storeId);
 
     const suggestion = generateAllocationSuggestion(set.players, characters, applicableRules, relationships, script.type);
-    const allocationId = createAllocation(storeId, scriptId, set.players, suggestion, suggestion.crossGenderCount);
+
+    const ruleVersions = suggestion.appliedRules.map(r => ({
+      id: r.id,
+      code: r.code,
+      version: r.version,
+      name: r.name,
+      status: 'published' as const,
+      priority: r.priority
+    }));
+
+    const allocationId = createAllocation(storeId, scriptId, set.players, suggestion, suggestion.crossGenderCount, ruleVersions);
     updateAllocationFeedback(allocationId, set.refused, set.changes, 'completed');
   }
 

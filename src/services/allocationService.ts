@@ -1,4 +1,4 @@
-import { Player, Character, Rule, AllocationSuggestion, CharacterRelationship, ScriptType, DmCommunicationPoint, LeadRecommendation, CrossGenderCandidate } from '../types';
+import { Player, Character, Rule, AllocationSuggestion, CharacterRelationship, ScriptType, DmCommunicationPoint, LeadRecommendation, CrossGenderCandidate, SimulationResult, SimulationDiff } from '../types';
 import { evaluatePlayerCharacterPair } from '../rules/ruleEngine';
 
 function permute(arr: number[]): number[][] {
@@ -33,7 +33,7 @@ export function generateAllocationSuggestion(
       leadRecommendations: [],
       crossGenderCandidates: [],
       dmCommunicationPoints: [],
-      appliedRules: rules.map(r => ({ id: r.id, name: r.name, code: r.code, priority: r.priority }))
+      appliedRules: rules.map(r => ({ id: r.id, name: r.name, code: r.code, version: r.version, priority: r.priority }))
     };
   }
 
@@ -143,7 +143,7 @@ export function generateAllocationSuggestion(
     leadRecommendations,
     crossGenderCandidates,
     dmCommunicationPoints,
-    appliedRules: rules.map(r => ({ id: r.id, name: r.name, code: r.code, priority: r.priority }))
+    appliedRules: rules.map(r => ({ id: r.id, name: r.name, code: r.code, version: r.version, priority: r.priority }))
   };
 }
 
@@ -412,4 +412,91 @@ export function getTopCandidates(
   }
 
   return result;
+}
+
+export function simulateAllocation(
+  players: Player[],
+  characters: Character[],
+  relationships: CharacterRelationship[],
+  scriptType: ScriptType,
+  options: {
+    currentRules: Rule[];
+    draftRules?: Rule[];
+    specifiedRules?: Rule[];
+  }
+): SimulationResult {
+  const current = generateAllocationSuggestion(
+    players, characters, options.currentRules, relationships, scriptType
+  );
+
+  const result: SimulationResult = { current };
+
+  if (options.draftRules && options.draftRules.length > 0) {
+    result.draft = generateAllocationSuggestion(
+      players, characters, options.draftRules, relationships, scriptType
+    );
+    result.diffCurrentVsDraft = computeAllocationDiff(current, result.draft);
+  }
+
+  if (options.specifiedRules && options.specifiedRules.length > 0) {
+    result.specified = generateAllocationSuggestion(
+      players, characters, options.specifiedRules, relationships, scriptType
+    );
+    result.diffCurrentVsSpecified = computeAllocationDiff(current, result.specified);
+  }
+
+  return result;
+}
+
+function computeAllocationDiff(
+  base: AllocationSuggestion,
+  target: AllocationSuggestion
+): SimulationDiff {
+  const roleChanges: { playerName: string; fromCharacter: string; toCharacter: string }[] = [];
+
+  const baseAssignments = new Map<string, string>();
+  for (const a of base.assignments) {
+    baseAssignments.set(a.player.name, a.character.name);
+  }
+
+  for (const a of target.assignments) {
+    const baseChar = baseAssignments.get(a.player.name);
+    if (baseChar && baseChar !== a.character.name) {
+      roleChanges.push({
+        playerName: a.player.name,
+        fromCharacter: baseChar,
+        toCharacter: a.character.name
+      });
+    }
+  }
+
+  const baseRuleMap = new Map<string, number>();
+  const targetRuleMap = new Map<string, number>();
+  for (const r of base.appliedRules) baseRuleMap.set(r.code, r.version);
+  for (const r of target.appliedRules) targetRuleMap.set(r.code, r.version);
+
+  const added: { code: string; version: number }[] = [];
+  const removed: { code: string; version: number }[] = [];
+  const changed: { code: string; fromVersion: number; toVersion: number }[] = [];
+
+  for (const [code, version] of targetRuleMap) {
+    if (!baseRuleMap.has(code)) {
+      added.push({ code, version });
+    } else if (baseRuleMap.get(code) !== version) {
+      changed.push({ code, fromVersion: baseRuleMap.get(code)!, toVersion: version });
+    }
+  }
+
+  for (const [code, version] of baseRuleMap) {
+    if (!targetRuleMap.has(code)) {
+      removed.push({ code, version });
+    }
+  }
+
+  return {
+    roleChanges,
+    crossGenderCountDiff: target.crossGenderCount - base.crossGenderCount,
+    totalScoreDiff: Math.round((target.totalScore - base.totalScore) * 100) / 100,
+    ruleVersionDiff: { added, removed, changed }
+  };
 }

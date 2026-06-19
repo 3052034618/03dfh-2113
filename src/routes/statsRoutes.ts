@@ -6,16 +6,33 @@ import {
   getScriptTroubleStats,
   getRefusalRateTrend,
   getOnSiteChangesTrend,
-  getGenderTroubleScripts
+  getGenderTroubleScripts,
+  getStatsSummary,
+  StatsFilters
 } from '../models/statsModel';
 
 const router = Router();
 
-router.get('/stores', handleAsync(async (req: Request, res: Response) => {
+function parseFilters(req: Request): StatsFilters {
+  const filters: StatsFilters = {};
+  const storeId = req.query.store_id ? parseInt(req.query.store_id as string) : undefined;
+  const scriptId = req.query.script_id ? parseInt(req.query.script_id as string) : undefined;
   const days = req.query.days ? parseInt(req.query.days as string) : undefined;
-  const stats = getAllStoresStats(days);
+
+  if (storeId !== undefined && !isNaN(storeId)) filters.storeId = storeId;
+  if (scriptId !== undefined && !isNaN(scriptId)) filters.scriptId = scriptId;
+  if (days !== undefined && !isNaN(days)) filters.days = days;
+
+  return filters;
+}
+
+router.get('/stores', handleAsync(async (req: Request, res: Response) => {
+  const filters = parseFilters(req);
+  const { meta, stats } = getAllStoresStats(filters);
+
   res.json({
     success: true,
+    meta,
     data: stats.map(s => ({
       store_id: s.storeId,
       store_name: s.storeName,
@@ -38,16 +55,20 @@ router.get('/stores/:storeId', handleAsync(async (req: Request, res: Response) =
     return;
   }
 
-  const days = req.query.days ? parseInt(req.query.days as string) : undefined;
+  const filters = parseFilters(req);
+  filters.storeId = storeId;
 
-  const stats = getStoreStats(storeId, days);
+  const stats = getStoreStats(storeId, filters.days);
   if (!stats) {
     res.status(404).json({ success: false, error: '门店不存在' });
     return;
   }
 
+  const { meta } = getAllStoresStats(filters);
+
   res.json({
     success: true,
+    meta,
     data: {
       store_id: stats.storeId,
       store_name: stats.storeName,
@@ -64,11 +85,13 @@ router.get('/stores/:storeId', handleAsync(async (req: Request, res: Response) =
 }));
 
 router.get('/scripts/trouble', handleAsync(async (req: Request, res: Response) => {
-  const days = req.query.days ? parseInt(req.query.days as string) : undefined;
-  const stats = getScriptTroubleStats(days);
+  const filters = parseFilters(req);
+  const { meta, data } = getScriptTroubleStats(filters);
+
   res.json({
     success: true,
-    data: stats.map(s => ({
+    meta,
+    data: data.map(s => ({
       script_id: s.script_id,
       script_name: s.script_name,
       trouble_count: s.trouble_count,
@@ -79,117 +102,67 @@ router.get('/scripts/trouble', handleAsync(async (req: Request, res: Response) =
 }));
 
 router.get('/trends/refusal-rate', handleAsync(async (req: Request, res: Response) => {
-  const storeId = req.query.store_id ? parseInt(req.query.store_id as string) : undefined;
-  const days = req.query.days ? parseInt(req.query.days as string) : 30;
+  const filters = parseFilters(req);
+  if (filters.days === undefined) filters.days = 30;
 
-  const trend = getRefusalRateTrend(storeId, days);
+  const { meta, trend } = getRefusalRateTrend(filters);
+
   res.json({
     success: true,
+    meta,
     data: {
       metric: 'cross_gender_refusal_rate',
-      days,
-      store_id: storeId || null,
       trend
     }
   });
 }));
 
 router.get('/trends/on-site-changes', handleAsync(async (req: Request, res: Response) => {
-  const storeId = req.query.store_id ? parseInt(req.query.store_id as string) : undefined;
-  const days = req.query.days ? parseInt(req.query.days as string) : 30;
+  const filters = parseFilters(req);
+  if (filters.days === undefined) filters.days = 30;
 
-  const trend = getOnSiteChangesTrend(storeId, days);
+  const { meta, trend } = getOnSiteChangesTrend(filters);
+
   res.json({
     success: true,
+    meta,
     data: {
       metric: 'average_on_site_changes',
-      days,
-      store_id: storeId || null,
       trend
     }
   });
 }));
 
 router.get('/gender-trouble', handleAsync(async (req: Request, res: Response) => {
-  const days = req.query.days ? parseInt(req.query.days as string) : undefined;
+  const filters = parseFilters(req);
   const limit = req.query.limit ? parseInt(req.query.limit as string) : 10;
 
-  const scripts = getGenderTroubleScripts(days, limit);
+  const { meta, scripts } = getGenderTroubleScripts(filters, isNaN(limit) ? 10 : limit);
+
   res.json({
     success: true,
+    meta,
     data: scripts
   });
 }));
 
 router.get('/summary', handleAsync(async (req: Request, res: Response) => {
-  const days = req.query.days ? parseInt(req.query.days as string) : undefined;
-
-  const storeStats = getAllStoresStats(days);
-  const scriptTrouble = getScriptTroubleStats(days);
-  const genderTrouble = getGenderTroubleScripts(days, 5);
-
-  const totalAllocations = storeStats.reduce((sum, s) => sum + s.totalAllocations, 0);
-  const avgRefusalRate = storeStats.length > 0
-    ? storeStats.reduce((sum, s) => sum + s.crossGenderRefusalRate, 0) / storeStats.length
-    : 0;
-  const avgOnSiteChanges = storeStats.length > 0
-    ? storeStats.reduce((sum, s) => sum + s.averageOnSiteChanges, 0) / storeStats.length
-    : 0;
+  const filters = parseFilters(req);
+  const summary = getStatsSummary(filters);
 
   res.json({
     success: true,
+    meta: summary.meta,
     data: {
-      total_stores: storeStats.length,
-      total_allocations: totalAllocations,
-      average_cross_gender_refusal_rate: Math.round(avgRefusalRate * 10000) / 100,
-      average_on_site_changes: Math.round(avgOnSiteChanges * 100) / 100,
-      top_troubled_scripts: scriptTrouble.slice(0, 5).map(s => ({
-        script_id: s.script_id,
-        script_name: s.script_name,
-        trouble_count: s.trouble_count,
-        allocations: s.allocations
-      })),
-      gender_trouble_scripts: genderTrouble,
-      insights: generateInsights(storeStats, scriptTrouble, genderTrouble)
+      total_stores: summary.totalStores,
+      total_allocations: summary.totalAllocations,
+      average_cross_gender_refusal_rate: Math.round(summary.averageCrossGenderRefusalRate * 10000) / 100,
+      average_on_site_changes: Math.round(summary.averageOnSiteChanges * 100) / 100,
+      top_troubled_scripts: summary.topTroubledScripts,
+      gender_trouble_scripts: summary.genderTroubleScripts,
+      insights: summary.insights
     }
   });
 }));
-
-function generateInsights(
-  storeStats: ReturnType<typeof getAllStoresStats>,
-  scriptTrouble: ReturnType<typeof getScriptTroubleStats>,
-  genderTrouble: ReturnType<typeof getGenderTroubleScripts>
-): string[] {
-  const insights: string[] = [];
-
-  const highRefusalStores = storeStats.filter(s => s.crossGenderRefusalRate > 0.3);
-  if (highRefusalStores.length > 0) {
-    const names = highRefusalStores.map(s => s.storeName).join('、');
-    insights.push(`以下门店反串拒绝率偏高（>30%）：${names}，建议优化约车时的性别配置提示`);
-  }
-
-  const highChangeStores = storeStats.filter(s => s.averageOnSiteChanges > 1);
-  if (highChangeStores.length > 0) {
-    const names = highChangeStores.map(s => s.storeName).join('、');
-    insights.push(`以下门店临场换角次数偏多（>1次/场）：${names}，建议加强分角准确度培训`);
-  }
-
-  if (genderTrouble.length > 0) {
-    const topScript = genderTrouble[0];
-    insights.push(`「${topScript.scriptName}」（${topScript.scriptType}）因性别配置翻车最严重（反串拒绝${topScript.crossGenderRefused}次、临场换角${topScript.onSiteChanges}次），建议调整上架提示或销售话术，提前告知玩家角色配置要求`);
-  }
-
-  const topTroubled = scriptTrouble.filter(s => s.trouble_count > 0).slice(0, 3);
-  if (topTroubled.length > 0 && genderTrouble.length === 0) {
-    const names = topTroubled.map(s => s.script_name).join('、');
-    insights.push(`高频翻车剧本：${names}，建议调整上架提示或销售话术`);
-  }
-
-  if (insights.length === 0) {
-    insights.push('整体运营状况良好，各门店反串拒绝率和临场换角次数均在正常范围内');
-  }
-
-  return insights;
-}
 
 export default router;

@@ -1,6 +1,7 @@
 export type ScriptType = 'emotional' | 'horror' | 'hardcore' | '欢乐' | '阵营' | 'other';
 export type Difficulty = 'easy' | 'medium' | 'hard' | 'extreme';
 export type Gender = 'male' | 'female' | 'other';
+export type RuleStatus = 'draft' | 'published' | 'gray' | 'archived';
 
 export interface Store {
   id: number;
@@ -64,17 +65,41 @@ export interface Rule {
   id: number;
   name: string;
   code: string;
+  version: number;
+  status: RuleStatus;
+  parent_version_id?: number;
   description?: string;
   priority: number;
   enabled: number;
   config_json: string;
   scope_json: string;
+  gray_store_ids_json: string;
   created_at: string;
   updated_at: string;
 }
 
+export interface RuleVersionSummary {
+  id: number;
+  code: string;
+  version: number;
+  name: string;
+  status: RuleStatus;
+  priority: number;
+}
+
 export interface RuleConfig {
   [key: string]: any;
+}
+
+export interface FilterMeta {
+  scriptId?: number;
+  scriptName?: string;
+  storeId?: number;
+  storeName?: string;
+  days?: number;
+  startDate?: string;
+  endDate?: string;
+  filterDescription: string;
 }
 
 export interface PlayerScore {
@@ -140,8 +165,32 @@ export interface AllocationSuggestion {
     id: number;
     name: string;
     code: string;
+    version: number;
     priority: number;
   }[];
+}
+
+export interface SimulationDiff {
+  roleChanges: {
+    playerName: string;
+    fromCharacter: string;
+    toCharacter: string;
+  }[];
+  crossGenderCountDiff: number;
+  totalScoreDiff: number;
+  ruleVersionDiff: {
+    added: { code: string; version: number }[];
+    removed: { code: string; version: number }[];
+    changed: { code: string; fromVersion: number; toVersion: number }[];
+  };
+}
+
+export interface SimulationResult {
+  current: AllocationSuggestion;
+  draft?: AllocationSuggestion;
+  specified?: AllocationSuggestion;
+  diffCurrentVsDraft?: SimulationDiff;
+  diffCurrentVsSpecified?: SimulationDiff;
 }
 
 export interface AllocationRecord {
@@ -150,6 +199,7 @@ export interface AllocationRecord {
   script_id: number;
   players_json: string;
   suggestion_json: string;
+  rule_versions_json: string;
   cross_gender_count: number;
   cross_gender_refused: number;
   on_site_changes: number;
