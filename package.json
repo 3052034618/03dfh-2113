@@ -1,0 +1,28 @@
+{
+  "name": "script-kill-ranking-service",
+  "version": "1.0.0",
+  "description": "连锁剧本杀门店排位规则服务",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "ts-node src/server.ts",
+    "seed": "ts-node src/seed.ts",
+    "test": "echo \"No tests configured\" && exit 0"
+  },
+  "keywords": ["script-kill", "ranking", "chain-store"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "sql.js": "^1.10.3",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2",
+    "@types/node": "^20.11.0",
+    "@types/express": "^4.17.21",
+    "@types/sql.js": "^1.4.9"
+  }
+}
